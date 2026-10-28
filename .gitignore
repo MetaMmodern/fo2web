@@ -1,0 +1,22 @@
+# User-owned game installation and derived proprietary code/data.
+game/
+gen/
+out/
+.venv/
+
+# Tooling output.
+build/
+node_modules/
+.DS_Store
+deps/
+dist/
+dist-dev/
+.fo2-objcache/
+*.bfs
+*.exe
+*.dll
+*.wasm
+*.log
+*.o
+__pycache__/
+*.pyc
