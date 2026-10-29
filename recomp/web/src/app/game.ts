@@ -86,20 +86,9 @@ export class GameSession {
         env: {
           ...o.env,
           NFSU2_CMDLINE: 'FlatOut2.exe',
-          // Temporary boot diagnostics: the FlatOut frame loop is alive but
-          // has not submitted geometry yet. Record the archive reads leading
-          // into that state so the responsible startup asset can be named.
-          FILELIST: '1',
-          READLOG: '1',
-          GPUVSLOG: '1',
+          // Keep periodic performance/audio summaries; enable detailed asset,
+          // shader and draw diagnostics explicitly through o.env when needed.
           DRAWDUMP: '0',
-          // Car material diagnostics: record the actual D3DX effect/pass,
-          // stage texture bindings, and pixel constants during the smoke run.
-          FO2TRACE: '1',
-          STAGEDUMP: '1',
-          PSC0: '1',
-          FO2_SHA_BIND_TRACE: '1',
-          NFSU2_MOVIE_LOG: '1',
           XFORMAT: '0',
         },
         dataBase: DATA_BASE, manifestUrl: MANIFEST_URL, saveDir: o.saveDir,

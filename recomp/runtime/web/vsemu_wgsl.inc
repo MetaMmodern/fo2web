@@ -372,10 +372,19 @@ int ps_to_wgsl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cube
             break; }
         case O_TEXREG2AR: {
             /* ps_1_1 texreg2ar tD,tS: use alpha as U and red as V from
-             * the previously sampled source register, then sample stage D. */
-            int dn = RN(y->dst) & 3;
-            w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, vec2f((%s).a, (%s).r))",
-                         dn, dn, s0, s0);
+             * the previously sampled source register, then sample stage D.
+             * texreg2ar only produces two coordinates, but a cube stage
+             * needs a direction.  Keep the destination stage's interpolated
+             * z (the reflection component the vertex shader supplied); the
+             * old vec2 emission made every cube variant of such a shader
+             * fail to compile. */
+            int dn = RN(y->dst) & 3, cube = (cubemask >> dn) & 1u;
+            if (cube)
+                w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, vec3f((%s).a, (%s).r, i.uv%d.z))",
+                             dn, dn, s0, s0, dn);
+            else
+                w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, vec2f((%s).a, (%s).r))",
+                             dn, dn, s0, s0);
             break; }
         case O_TEXCOORD: {
             /* texcoord tN / texcrd: t[N] = uvN (the Mac uses the destination

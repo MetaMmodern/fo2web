@@ -1896,13 +1896,13 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
      * elements from guest memory and testing each with mem_is_committed
      * (~1300 times per frame).  Safe: declaration objects are copied when
      * created and never change, and com_alloc does not reuse addresses. */
-    static struct { uint32_t decl; const VSProg *prog; int nel, p_off, p_type, c_off, c_type,
+    static struct { uint32_t decl, stride; const VSProg *prog; int nel, p_off, p_type, c_off, c_type,
                     t_off, t_type, implicit_layout, ok; DElem el[16]; } dcc[64];
     uint32_t d = g_cur_decl;
     int implicit_layout = 0;
-    unsigned dci = (unsigned)(((uintptr_t)prog >> 4) ^ (d >> 3) ^ (d >> 11)) & 63u;
+    unsigned dci = (unsigned)(((uintptr_t)prog >> 4) ^ (d >> 3) ^ (d >> 11) ^ stride) & 63u;
     int dlog = ENVC("DECLLOG") != NULL;
-    if (dlog || !dcc[dci].ok || dcc[dci].decl != d || dcc[dci].prog != prog){
+    if (dlog || !dcc[dci].ok || dcc[dci].decl != d || dcc[dci].stride != stride || dcc[dci].prog != prog){
     DElem el[16]; int nel = 0;
     int p_off = -1, p_type = 2, c_off = -1, c_type = 4, t_off = -1, t_type = 1;
     uint32_t ep = (d && mem_is_committed(d+8)) ? MR32(d+4) : 0;
@@ -1945,25 +1945,35 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
         }
     }
 #ifdef FLATOUT2
-    /* FlatOut's initial image quad has no D3D declaration, but its effect
-     * shader declares the conventional 24-byte position/color/UV layout.
-     * Feed that layout to the CPU shader interpreter.  Do not send it through
-     * the GPU fast path yet: WebGPU's synthesized input binding differs here,
-     * whereas the CPU interpreter precisely applies FlatOut's c0..c3 screen
-     * projection. */
-    if (!ep && prog && stride >= 24u){
+    /* FlatOut also draws without a D3D declaration. The 24-byte bootstrap
+     * quad and the 32/36-byte car streams have different layouts. Treating
+     * every stride >= 24 as the quad read car normals as UVs and color. */
+    if (!ep && prog && stride == 24u){
         el[0].off = 0;  el[0].type = 2; el[0].reg = 0;
         el[1].off = 12; el[1].type = 4; el[1].reg = 2;
         el[2].off = 16; el[2].type = 1; el[2].reg = 3;
         nel = 3;
-        implicit_layout = 1;
+        implicit_layout = 1;     /* quad needs its direct c0..c3 projection */
+    } else if (!ep && prog && (stride == 32u || stride == 36u)){
+        int rg;
+        rg = vs_input_reg(prog, 0, 0);   /* POSITION */
+        if (rg >= 0){ el[nel].off=0; el[nel].type=2; el[nel].reg=(int8_t)rg; nel++; }
+        rg = vs_input_reg(prog, 3, 0);   /* NORMAL */
+        if (rg >= 0){ el[nel].off=12; el[nel].type=2; el[nel].reg=(int8_t)rg; nel++; }
+        if (stride == 36u){
+            rg = vs_input_reg(prog, 10, 0); /* D3DCOLOR */
+            if (rg >= 0){ el[nel].off=24; el[nel].type=4; el[nel].reg=(int8_t)rg; nel++; }
+        }
+        rg = vs_input_reg(prog, 5, 0);   /* TEXCOORD0 */
+        if (rg >= 0){ el[nel].off=(uint16_t)(stride-8u); el[nel].type=1; el[nel].reg=(int8_t)rg; nel++; }
+        implicit_layout = 2;     /* use the real vertex shader on the CPU */
     }
 #endif
     /* without a declaration, NFSU2's standard layout: pos@0 color@12 uv@16 */
     if (p_off < 0){ p_off = 0;  p_type = 2; }
     if (c_off < 0){ c_off = 12; c_type = 4; }
     if (t_off < 0){ t_off = 16; t_type = 1; }
-    dcc[dci].decl = d; dcc[dci].prog = prog; dcc[dci].nel = nel;
+    dcc[dci].decl = d; dcc[dci].stride = stride; dcc[dci].prog = prog; dcc[dci].nel = nel;
     dcc[dci].p_off = p_off; dcc[dci].p_type = p_type; dcc[dci].c_off = c_off;
     dcc[dci].c_type = c_type; dcc[dci].t_off = t_off; dcc[dci].t_type = t_type;
     dcc[dci].implicit_layout = implicit_layout;
@@ -1973,6 +1983,49 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     const DElem *el = dcc[dci].el; int nel = dcc[dci].nel;
     int p_off = dcc[dci].p_off, p_type = dcc[dci].p_type, c_off = dcc[dci].c_off,
         c_type = dcc[dci].c_type, t_off = dcc[dci].t_off, t_type = dcc[dci].t_type;
+
+    /* A bounded, factual trace for FlatOut's declaration-less 32-byte
+     * PosNormTex1 meshes (the tyres/rims).  A WebGPU capture starts AFTER
+     * this point, so it cannot tell whether a bad wheel came from the source
+     * indices, the guest vertex shader, or the page renderer.  This records
+     * both sides of that boundary for a single menu frame. */
+    int wheel_trace = 0;
+    static unsigned wheel_trace_n = 0;
+    /* Always record which path the draw took.  g_ix.n means the persistent
+     * indexed path: it has no contiguous guest vertex pointer, so its bounds
+     * are meaningless, but knowing that it ran (and that the expansion
+     * fallback did not) is what distinguishes a bad source mesh from a bad
+     * mirror/pool.  Only the expansion path gets a full input record. */
+    if (ENVC("FO2_WHEEL_TRACE") && implicit_layout == 2 && stride == 32u && wheel_trace_n < 48u){
+        float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+        if (!g_ix.n){
+            for (uint32_t q = 0; q < nv; q++){
+                uint32_t a = vp + q * stride;
+                if (!mem_is_committed(a + 11u)) break;
+                for (int j = 0; j < 3; j++){ float x = MRF32(a + 4u*(uint32_t)j);
+                    if (x < lo[j]) lo[j] = x; if (x > hi[j]) hi[j] = x; }
+            }
+        }
+        fprintf(stderr, "[wheel-input] #%u ps=%d vs=%u tex=%u pt=%u verts=%u path=%s idx=%u stride=%u pos=[%.6g..%.6g,%.6g..%.6g,%.6g..%.6g] c0=(%.6g %.6g %.6g %.6g) c1=(%.6g %.6g %.6g %.6g) c2=(%.6g %.6g %.6g %.6g) c3=(%.6g %.6g %.6g %.6g)\n",
+                ++wheel_trace_n, g_cur_ps_id, g_cur_vs, g_cur_tex, pt, nv,
+                g_ix.n ? "pool" : "expand", g_ix.n, stride,
+                lo[0],hi[0],lo[1],hi[1],lo[2],hi[2],
+                vsk->f[0][0],vsk->f[0][1],vsk->f[0][2],vsk->f[0][3],
+                vsk->f[1][0],vsk->f[1][1],vsk->f[1][2],vsk->f[1][3],
+                vsk->f[2][0],vsk->f[2][1],vsk->f[2][2],vsk->f[2][3],
+                vsk->f[3][0],vsk->f[3][1],vsk->f[3][2],vsk->f[3][3]);
+        wheel_trace = !g_ix.n;
+    }
+
+    /* Transformed companion for the [body36] source trace: NDC extent plus
+     * depth (z/w), so we can see whether a 36-byte arch-liner surface is
+     * behind or in front of the wheel it should occlude. */
+    int body_trace = 0;
+    static unsigned body_trace_n = 0;
+    if (ENVC("FO2_BODY_TRACE") && implicit_layout == 2 && stride == 36u && body_trace_n < 40u){
+        body_trace_n++;
+        body_trace = !g_ix.n;
+    }
 
     /* ---------------- GPU vertex shader (GPUVS) ----------------
      * Measured: ~45% of the run time was in the CPU vs_run interpreter,
@@ -2076,7 +2129,7 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
              * for FlatOut's declaration-less start-image quad.  Its intended
              * operation is simply v0 dotted with c0..c3; do that directly
              * here, preserving FlatOut's exact screen projection. */
-            if (implicit_layout){
+            if (implicit_layout == 1){
                 for (int q = 0; q < 4; q++)
                     so.pos[q] = v[0][0]*vsk->f[q][0] + v[0][1]*vsk->f[q][1]
                               + v[0][2]*vsk->f[q][2] + v[0][3]*vsk->f[q][3];
@@ -2125,6 +2178,34 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
             if (rz < g_rmin[2]) g_rmin[2] = rz;  if (rz > g_rmax[2]) g_rmax[2] = rz;
         }
     } else g_ff_draws++;
+    if (wheel_trace){
+        float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f };
+        unsigned badw = 0;
+        for (uint32_t q = 0; q < nv; q++){
+            float w = tv[q].w;
+            if (!(w > 0.f)){ badw++; continue; }
+            float x = tv[q].x / w, y = tv[q].y / w;
+            if (x < lo[0]) lo[0] = x; if (x > hi[0]) hi[0] = x;
+            if (y < lo[1]) lo[1] = y; if (y > hi[1]) hi[1] = y;
+        }
+        fprintf(stderr, "[wheel-output] ndc=[%.6g..%.6g,%.6g..%.6g] badw=%u uv0=(%.6g %.6g) uv1=(%.6g %.6g)\n",
+                lo[0],hi[0],lo[1],hi[1],badw,
+                tv[0].t[0][0],tv[0].t[0][1],tv[0].t[1][0],tv[0].t[1][1]);
+    }
+    if (body_trace){
+        float lo[2] = { 1e30f, 1e30f }, hi[2] = { -1e30f, -1e30f }, zlo = 1e30f, zhi = -1e30f;
+        unsigned badw = 0;
+        for (uint32_t q = 0; q < nv; q++){
+            float w = tv[q].w;
+            if (!(w > 0.f)){ badw++; continue; }
+            float x = tv[q].x / w, y = tv[q].y / w, z = tv[q].z / w;
+            if (x < lo[0]) lo[0] = x; if (x > hi[0]) hi[0] = x;
+            if (y < lo[1]) lo[1] = y; if (y > hi[1]) hi[1] = y;
+            if (z < zlo) zlo = z; if (z > zhi) zhi = z;
+        }
+        fprintf(stderr, "[body36-out] ps=%d tex=%u verts=%u ndc=[%.4g..%.4g,%.4g..%.4g] z=%.4g..%.4g badw=%u\n",
+                g_cur_ps_id, g_cur_tex, nv, lo[0],hi[0],lo[1],hi[1], zlo,zhi, badw);
+    }
     /* Are the transformed vertices on screen?  Go from clip space to NDC and count. */
     { for (uint32_t i2 = 0; i2 < nv; i2++){
         float w2 = tv[i2].w;
@@ -2950,6 +3031,144 @@ int com_call(CPU *c, uint32_t magic){
                 /* (this, Type, BaseVertexIndex, MinIndex, NumVertices,
                  *  StartIndex, PrimitiveCount) */
                 uint32_t pt=A(c,1), basev=A(c,2), starti=A(c,5), nprim=A(c,6);
+                /* Source-side companion to [wheel-input]/[wheel-output].
+                 * This is deliberately before either the persistent-index
+                 * fast path or the expansion fallback: it reports exactly
+                 * what the game asked D3D to draw. */
+                if (ENVC("FO2_WHEEL_TRACE") && g_ss_stride == 32u && g_ss_vb && g_ib_obj){
+                    static unsigned wheel_ix_n = 0;
+                    if (wheel_ix_n < 48u){
+                        uint32_t vbase0 = MR32(g_ss_vb+8u) + g_ss_off;
+                        uint32_t ibase0 = MR32(g_ib_obj+8u), ifmt0 = MR32(g_ib_obj+12u);
+                        uint32_t isz0 = ifmt0 == 102u ? 4u : 2u;
+                        uint32_t nidx0 = pt==4u ? nprim*3u : nprim+2u;
+                        uint32_t decl_min0=A(c,3), decl_n0=A(c,4);
+                        uint32_t ixlo0=0xffffffffu, ixhi0=0u, oob0=0u, bad0=0u, deg0=0u;
+                        uint32_t prev0=0xffffffffu, prev1=0xffffffffu;
+                        float plo0[3]={1e30f,1e30f,1e30f}, phi0[3]={-1e30f,-1e30f,-1e30f};
+                        float nlo0[3]={1e30f,1e30f,1e30f}, nhi0[3]={-1e30f,-1e30f,-1e30f};
+                        float ulo0[2]={1e30f,1e30f}, uhi0[2]={-1e30f,-1e30f};
+                        uint32_t pmin_i0[3]={0,0,0}, pmax_i0[3]={0,0,0};
+                        /* Resolve the layout the vertex shader will actually
+                         * read, instead of assuming pos@0/nrm@12/uv@24.  An
+                         * explicit declaration wins; otherwise apply the same
+                         * declaration-less rules as draw_up(). */
+                        uint32_t decl0 = g_cur_decl;
+                        uint32_t ep0 = (decl0 && mem_is_committed(decl0+8u)) ? MR32(decl0+4u) : 0;
+                        uint32_t poff0=0u, noff0=12u, toff0=24u;
+                        int lay0 = 0;
+                        if (ep0){
+                            lay0 = 1;
+                            poff0 = noff0 = toff0 = 0xffffffffu;
+                            for (int k=0; k<32; k++){
+                                uint32_t e0 = ep0 + 8u*(uint32_t)k;
+                                if (!mem_is_committed(e0+7u)) break;
+                                unsigned st=MR16(e0), of=MR16(e0+2), ty=MR8(e0+4),
+                                         us=MR8(e0+6), ui=MR8(e0+7);
+                                if (st == 0xFFu && ty == 17u) break;
+                                if (st != 0u) continue;
+                                if (us == 0u && ui == 0u) poff0 = of;
+                                else if (us == 3u && ui == 0u) noff0 = of;
+                                else if (us == 5u && ui == 0u) toff0 = of;
+                            }
+                            if (poff0 == 0xffffffffu) poff0 = 0u;
+                            if (noff0 == 0xffffffffu) noff0 = 12u;
+                            if (toff0 == 0xffffffffu) toff0 = 24u;
+                        } else if (g_ss_stride == 32u){
+                            lay0 = 2; poff0 = 0u; noff0 = 12u; toff0 = 24u;
+                        } else if (g_ss_stride == 36u){
+                            lay0 = 3; poff0 = 0u; noff0 = 12u; toff0 = 28u;
+                        }
+                        int attrs0 = poff0+12u <= g_ss_stride &&
+                                     noff0+12u <= g_ss_stride &&
+                                     toff0+ 8u <= g_ss_stride;
+                        /* Record the complete index domain and the data it
+                         * addresses.  This establishes whether a malformed
+                         * part is a topology/addressing problem or a normal/
+                         * UV/material problem before it reaches WebGPU. */
+                        for (uint32_t q=0; q<nidx0; q++){
+                            uint32_t a=ibase0+(starti+q)*isz0;
+                            if (!mem_is_committed(a+isz0-1u)){ bad0++; continue; }
+                            uint32_t vi=isz0==2u?MR16(a):MR32(a), vno=basev+vi;
+                            if (vi<ixlo0) ixlo0=vi; if (vi>ixhi0) ixhi0=vi;
+                            if (vno<decl_min0 || vno>=decl_min0+decl_n0) oob0++;
+                            /* Only compare after both previous indices exist;
+                             * the old zero initialisation made every first
+                             * triangle look degenerate. */
+                            if (q>=2u && prev0!=0xffffffffu && prev1!=0xffffffffu &&
+                                (vi==prev0 || vi==prev1 || prev0==prev1)) deg0++;
+                            prev0=prev1; prev1=vi;
+                            uint32_t va=vbase0+vno*g_ss_stride;
+                            if (!mem_is_committed(va+g_ss_stride-1u)){ bad0++; continue; }
+                            if (!attrs0) continue;
+                            for(int j=0;j<3;j++){
+                                float p=MRF32(va+poff0+4u*(uint32_t)j), n=MRF32(va+noff0+4u*(uint32_t)j);
+                                if(p<plo0[j]){plo0[j]=p;pmin_i0[j]=vi;} if(p>phi0[j]){phi0[j]=p;pmax_i0[j]=vi;}
+                                if(n<nlo0[j])nlo0[j]=n; if(n>nhi0[j])nhi0[j]=n;
+                            }
+                            for(int j=0;j<2;j++){
+                                float u=MRF32(va+toff0+4u*(uint32_t)j);
+                                if(u<ulo0[j])ulo0[j]=u; if(u>uhi0[j])uhi0[j]=u;
+                            }
+                        }
+                        fprintf(stderr,"[wheel-index] #%u ps=%d vs=%u tex=%u pt=%u base=%d min=%u verts=%u start=%u prims=%u vb=%08x ib=%08x stride=%u off=%u isz=%u layout=%d decl=%08x poff=%u noff=%u toff=%u attrs=%d indices=",
+                                ++wheel_ix_n,g_cur_ps_id,g_cur_vs,g_cur_tex,pt,(int32_t)basev,A(c,3),A(c,4),starti,nprim,
+                                g_ss_vb,g_ib_obj,g_ss_stride,g_ss_off,isz0,lay0,decl0,poff0,noff0,toff0,attrs0);
+                        /* Small parts are dumped in full: their extremes must
+                         * be attributable to a specific index. */
+                        unsigned ndump0 = nidx0 <= 96u ? nidx0 : 12u;
+                        for (unsigned q=0; q<ndump0; q++){
+                            uint32_t a=ibase0+(starti+q)*isz0;
+                            if (!mem_is_committed(a+isz0-1u)){ fprintf(stderr," ?"); break; }
+                            uint32_t vi=isz0==2u?MR16(a):MR32(a);
+                            uint32_t va=vbase0+(basev+vi)*g_ss_stride;
+                            if (mem_is_committed(va+g_ss_stride-1u) && attrs0)
+                                fprintf(stderr," %u:(%.4g,%.4g,%.4g)",vi,
+                                        MRF32(va+poff0),MRF32(va+poff0+4),MRF32(va+poff0+8));
+                            else fprintf(stderr," %u:bad",vi);
+                        }
+                        fprintf(stderr," | domain=%u..%u declared=%u..%u oob=%u deg=%u bad=%u pos=[%.4g..%.4g,%.4g..%.4g,%.4g..%.4g] ext=x%u/%u y%u/%u z%u/%u nrm=[%.4g..%.4g,%.4g..%.4g,%.4g..%.4g] uv=[%.4g..%.4g,%.4g..%.4g]\n",
+                                ixlo0,ixhi0,decl_min0,decl_min0+decl_n0-1u,oob0,deg0,bad0,
+                                plo0[0],phi0[0],plo0[1],phi0[1],plo0[2],phi0[2],
+                                pmin_i0[0],pmax_i0[0],pmin_i0[1],pmax_i0[1],pmin_i0[2],pmax_i0[2],
+                                nlo0[0],nhi0[0],nlo0[1],nhi0[1],nlo0[2],nhi0[2],
+                                ulo0[0],uhi0[0],ulo0[1],uhi0[1]);
+                    }
+                }
+                /* 36-byte Pos/Normal/Color/UV body surfaces (bumpers, wheel
+                 * arch liners, "common" material): the far-side wheel shows
+                 * through the arch, so record which of these draw, their
+                 * object-space extent, colour/alpha range, and render state,
+                 * interleaved with the wheel trace so draw order is visible. */
+                if (ENVC("FO2_BODY_TRACE") && g_ss_stride == 36u && g_ss_vb && g_ib_obj){
+                    static unsigned body_n = 0;
+                    if (body_n < 40u){
+                        uint32_t vbase0 = MR32(g_ss_vb+8u) + g_ss_off;
+                        uint32_t ibase0 = MR32(g_ib_obj+8u), ifmt0 = MR32(g_ib_obj+12u);
+                        uint32_t isz0 = ifmt0 == 102u ? 4u : 2u;
+                        uint32_t nidx0 = pt==4u ? nprim*3u : nprim+2u;
+                        float plo[3]={1e30f,1e30f,1e30f}, phi[3]={-1e30f,-1e30f,-1e30f};
+                        uint32_t clo=0xffffffffu, chi=0u, alo=0xffffffffu, ahi=0u, bad=0u;
+                        for (uint32_t q=0; q<nidx0; q++){
+                            uint32_t a=ibase0+(starti+q)*isz0;
+                            if (!mem_is_committed(a+isz0-1u)){ bad++; break; }
+                            uint32_t vi=isz0==2u?MR16(a):MR32(a);
+                            uint32_t va=vbase0+(basev+vi)*g_ss_stride;
+                            if (!mem_is_committed(va+35u)){ bad++; break; }
+                            for(int j=0;j<3;j++){ float p=MRF32(va+4u*(uint32_t)j);
+                                if(p<plo[j])plo[j]=p; if(p>phi[j])phi[j]=p; }
+                            uint32_t col=MR32(va+24u);
+                            if(col<clo)clo=col; if(col>chi)chi=col;
+                            uint32_t al=(col>>24)&0xffu; if(al<alo)alo=al; if(al>ahi)ahi=al;
+                        }
+                        fprintf(stderr,"[body36] #%u ps=%d vs=%u tex=%u pt=%u base=%d min=%u verts=%u start=%u prims=%u vb=%08x ib=%08x stride=%u off=%u decl=%08x rs(z=%u/%u alpha=%u blend=%u,%u cull=%u) pos=[%.4g..%.4g,%.4g..%.4g,%.4g..%.4g] col=%08x..%08x a=%u..%u bad=%u\n",
+                                ++body_n,g_cur_ps_id,g_cur_vs,g_cur_tex,pt,(int32_t)basev,A(c,3),A(c,4),starti,nprim,
+                                g_ss_vb,g_ib_obj,g_ss_stride,g_ss_off,g_cur_decl,
+                                g_rs[7],g_rs[14],g_rs[15],g_rs[19],g_rs[20],g_rs[22],
+                                plo[0],phi[0],plo[1],phi[1],plo[2],phi[2],
+                                clo,chi,alo,ahi,bad);
+                    }
+                }
                 /* Keep one compact, bounded record for indexed car/material
                  * draws. This joins the SHA effect bindings to the renderer's
                  * actual draw state without turning every D3D call into a log. */
@@ -5383,6 +5602,12 @@ static void fill_caps(uint32_t p){
     MR32(p+0x1C)=0x001BBEF0; MR32(p+0x20)=0x0000033F; MR32(p+0x24)=0x0F730191;
     MR32(p+0x28)=0x000000FF; MR32(p+0x2C)=0x00003FFF; MR32(p+0x30)=0x00003FFF;
     MR32(p+0x34)=0x000000FF; MR32(p+0x38)=0x0008FFFF; MR32(p+0x3C)=0x0021EDA5;
+#ifdef FLATOUT2
+    /* TextureCaps: WebGPU supports rectangular textures. Advertising
+     * D3DPTEXTURECAPS_SQUAREONLY makes FlatOut allocate its 256x128 tyre
+     * atlases as 256x256 even though their source rows remain rectangular. */
+    MR32(p+0x3C) &= ~0x00000020u;
+#endif
     MR32(p+0x40)=0x07030700; MR32(p+0x44)=0x07030700; MR32(p+0x48)=0x07030700;
     MR32(p+0x4C)=0x0000003F; MR32(p+0x50)=0x0000003F; MR32(p+0x54)=0x0000001F;
     MR32(p+0x58)=4096; MR32(p+0x5C)=4096; MR32(p+0x60)=256; MR32(p+0x64)=8192;

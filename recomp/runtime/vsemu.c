@@ -921,13 +921,21 @@ int ps_to_msl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cubem
             /* ps_1_1 texreg2ar tD,tS: use source alpha as U and red as V
              * to sample texture stage D.  FlatOut uses this for its colour
              * remap lookup table. */
-            int dn = RN(x->dst) & 3;
+            int dn = RN(x->dst) & 3, cube = (cubemask >> dn) & 1u;
             if (x->nsrc > 0){
                 char sr[160];
                 msl_src(sr, sizeof sr, p, x->src[0], x->rel[0]);
-                snprintf(ex, sizeof ex, "SMP%d(float2((%s).a, (%s).r), TPICK(%d).xyz)", dn, sr, sr, dn);
+                /* A cube stage needs a direction; texreg2ar only supplies
+                 * u,v, so retain the destination stage's interpolated z. */
+                if (cube)
+                    snprintf(ex, sizeof ex, "SMP%d(float2(0.0), float3((%s).a, (%s).r, TPICK(%d).z))", dn, sr, sr, dn);
+                else
+                    snprintf(ex, sizeof ex, "SMP%d(float2((%s).a, (%s).r), TPICK(%d).xyz)", dn, sr, sr, dn);
             } else {
-                snprintf(ex, sizeof ex, "SMP%d(float2((TPICK(%d)).a, (TPICK(%d)).r), TPICK(%d).xyz)", dn, dn, dn, dn);
+                if (cube)
+                    snprintf(ex, sizeof ex, "SMP%d(float2(0.0), float3((TPICK(%d)).a, (TPICK(%d)).r, TPICK(%d).z))", dn, dn, dn, dn);
+                else
+                    snprintf(ex, sizeof ex, "SMP%d(float2((TPICK(%d)).a, (TPICK(%d)).r), TPICK(%d).xyz)", dn, dn, dn, dn);
             }
             break;
         }

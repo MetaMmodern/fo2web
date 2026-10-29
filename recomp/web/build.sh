@@ -11,7 +11,7 @@
 # the page's own host (web/src/host): no Emscripten.
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-WASI="${WASI:-$(ls -d "$ROOT"/deps/wasi-sdk-*-arm64-macos "$ROOT"/deps/wasi-sdk-*-x86_64-linux 2>/dev/null | tail -1)}"
+WASI="${WASI:-$(ls -d "$ROOT"/deps/wasi-sdk-* "$ROOT"/../deps/wasi-sdk-* 2>/dev/null | tail -1)}"
 [ -x "$WASI/bin/clang" ] || { echo "wasi-sdk not found in deps/ (set WASI=...)"; exit 1; }
 # guest memory accesses must keep their may_alias types (cpu.h)
 WASI="$WASI" web/tools/aliasguard.sh > /dev/null || { WASI="$WASI" web/tools/aliasguard.sh; exit 1; }

@@ -84,6 +84,17 @@ int ps_ref_run(const VSProg *p, const PSRefPar *P, const PSRefIn *in, PSRefTex t
         float s[3][4], d[4] = { 0, 0, 0, 0 };
         for (unsigned i = 0; i < x->nsrc && i < 3; i++) psr_src(&e, x->src[i], s[i]);
         switch (x->op){
+        case O_TEXREG2AR: {
+            /* texreg2ar tD,tS: sample stage D at (S.a, S.r), or at the
+             * stage's own coordinate when there is no source.  A cube stage
+             * needs a third component: keep the stage's interpolated z. */
+            int dn = RN(x->dst) & 3, cube = (cubemask >> dn) & 1u;
+            float c[3];
+            if (x->nsrc > 0){ c[0] = s[0][3]; c[1] = s[0][0]; }
+            else            { c[0] = in->uv[dn][3]; c[1] = in->uv[dn][0]; }
+            c[2] = cube ? in->uv[dn][2] : 0.f;
+            tex(dn, c, cube ? 3 : 2, d);
+            break; }
         case O_TEX: case O_TEXLDD: case O_TEXLDL: {
             int dn = RN(x->dst) & 3, smp;
             float c[3];

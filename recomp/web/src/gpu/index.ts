@@ -17,6 +17,7 @@ import { HostKind } from '../host/abi';
 import * as P from './proto';
 import { C, F } from './proto';
 import { Encoder } from './encoder';
+import type { LocalGpuInspector } from './local-inspector';
 import type { FromPng, ToPng } from './png-worker';
 
 export interface RendererOptions {
@@ -255,6 +256,14 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   const WIN_MAX = 1 << 17;
   let winEnc: number[] = [], winGpu: number[] = [], winDraws = 0, winPasses = 0, winCalls = { ...enc.calls };
   let done: number[] = [];
+  const localInspector: LocalGpuInspector | undefined = window.webgpuInspector;
+  let captureNext: { resolve: () => void; reject: (reason: unknown) => void } | null = null;
+  const captureGpuFrame = (): Promise<void> => new Promise((resolve, reject) => {
+    if (captureNext) { reject(new Error('A GPU frame capture is already queued')); return; }
+    captureNext = { resolve, reject };
+    log('[gpu-inspector] capturing the next game frame');
+  });
+  if (localInspector) window.fo2CaptureGpuFrame = captureGpuFrame;
   const dumpWaiters: { name: string; resolve: (b: Blob) => void }[] = [];
   const pending = new Set<Promise<unknown>>();
   const waitAsync = (Atomics as unknown as { waitAsync(a: Int32Array, i: number, v: number, t?: number):
@@ -407,6 +416,14 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     }
   };
   const encodeAndSubmit = (b: number) => {
+    const capture = captureNext;
+    captureNext = null;
+    let capturing = false;
+    if (capture && localInspector) {
+      try { localInspector.beginFrameCapture({ maxBufferSize: 128 * 1024 * 1024 }); capturing = true; }
+      catch (e) { capture.reject(e); log(`[gpu-inspector] capture could not start: ${e}`); }
+    }
+    try {
     const t0 = performance.now();
     const ce = device.createCommandEncoder();
     const slot = timing && !qBusy[qNext] ? qNext : -1;
@@ -463,6 +480,16 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     const rbId = U[fw + F.rbId], rbTex = rbId ? enc.readable(ce, U[fw + F.rbTex]) : null;
     const rbRead = rbTex ? copyOut(ce, rbTex) : null;
     device.queue.submit([ce.finish()]);
+    if (capturing && capture && localInspector) {
+      capturing = false;
+      try {
+        localInspector.endFrameCapture();
+        void localInspector.saveCaptureData(`fo2-frame-${Date.now()}.wgpuc`).then(() => {
+          log('[gpu-inspector] saved one frame to Downloads');
+          capture.resolve();
+        }, e => { log(`[gpu-inspector] save failed: ${e}`); capture.reject(e); });
+      } catch (e) { log(`[gpu-inspector] capture failed: ${e}`); capture.reject(e); }
+    }
     enc.afterSubmit();
     if (rbId) readForGame(rbId, rbRead, U[fw + F.rbDst], U[fw + F.rbPitch], U[fw + F.rbRows]);
     // quick chat's places over the cars in this very frame (GwMarks in its constants, from a module that writes them)
@@ -509,6 +536,13 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
         if (r.name === dumpName) { const C3 = u32(); C3[cw + C.dumpsDone]++; }
       }).catch(x => log(`[gpu] dump failed: ${x}`));
       pending.add(job); job.finally(() => pending.delete(job));
+    }
+    } catch (e) {
+      if (capturing && capture && localInspector) {
+        try { localInspector.endFrameCapture(); } catch { /* already failed */ }
+        capture.reject(e);
+      }
+      throw e;
     }
   };
 
@@ -670,6 +704,8 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     },
     detach: () => {
       if (!alive) return;
+      if (window.fo2CaptureGpuFrame === captureGpuFrame) delete window.fo2CaptureGpuFrame;
+      if (captureNext) { captureNext.reject(new Error('Renderer detached before the requested frame')); captureNext = null; }
       alive = false; cancelAnimationFrame(rafId); clearInterval(warmTimer); ro.disconnect();
       if (enc.warmDirty) try { localStorage.setItem(WARM_KEY, JSON.stringify(enc.warmEntries().slice(-4000))); } catch { /* full or off */ }
       // the game stops recording at its next present instead of waiting for a page
