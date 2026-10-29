@@ -233,6 +233,42 @@ static int game_vectors(const char *dump, const char *dir){
     return n;
 }
 
+/* FlatOut's declaration-less car streams (com.c draw_up, implicit_layout 2):
+ * POSITION0 @0 FLOAT3, NORMAL0 @12 FLOAT3, COLOR0 @24 D3DCOLOR for the
+ * 36-byte form, TEXCOORD0 @stride-8 FLOAT2.  A shader can only use this layout
+ * when every input it declares is supplied by it; otherwise the draw stays on
+ * the CPU and there is nothing to compare. */
+static int flatout_layout(const VSProg *p, unsigned stride, int dcl[16][2]){
+    for (int i = 0; i < 16; i++){ dcl[i][0] = -1; dcl[i][1] = 0; }
+    int any = 0;
+    for (int us = 0; us < 14; us++)
+        for (int ui = 0; ui < 16; ui++){
+            int rg = vs_input_reg(p, us, ui);
+            if (rg < 0) continue;
+            int off = -1, ty = 0;
+            if (us == 0 && ui == 0){ off = 0; ty = 2; }                  /* POSITION */
+            else if (us == 3 && ui == 0){ off = 12; ty = 2; }            /* NORMAL */
+            else if (us == 10 && ui == 0 && stride == 36u){ off = 24; ty = 4; } /* D3DCOLOR */
+            else if (us == 5 && ui == 0){ off = (int)stride - 8; ty = 1; }      /* TEXCOORD0 */
+            else return 0;
+            if (rg >= 16) return 0;
+            dcl[rg][0] = off; dcl[rg][1] = ty; any = 1;
+        }
+    return any;
+}
+
+static void emit_pair(const char *dir, FILE *ix, const VSProg *p, const int dcl[16][2],
+                      const char *label, int *id, int *ok, int *fail){
+    int n = vs_to_wgsl(p, ++*id, (const int (*)[2])dcl, g_buf, sizeof g_buf);
+    char name[64]; snprintf(name, sizeof name, "vs_%d.wgsl", *id);
+    if (n > 0){
+        put(dir, name, g_buf, (size_t)n);
+        write_vectors(dir, *id, p, (const int (*)[2])dcl);
+        (*ok)++;
+    } else (*fail)++;
+    fprintf(ix, "vs %d = %s %s\n", *id, label, n > 0 ? "ok" : "REJECTED");
+}
+
 static int pairs(const char *dump, const char *dir){
     DIR *d = opendir(dump);
     if (!d){ perror(dump); return 1; }
@@ -285,18 +321,29 @@ static int pairs(const char *dump, const char *dir){
                     if (vs_input_reg(p, us, ui) >= 0 && !have[us][ui]){ covered = 0; break; }
             if (!covered) continue;
             paired = 1;
-            int n = vs_to_wgsl(p, ++id, (const int (*)[2])dcl, g_buf, sizeof g_buf);
-            char name[64]; snprintf(name, sizeof name, "vs_%d.wgsl", id);
-            if (n > 0){ put(dir, name, g_buf, (size_t)n); write_vectors(dir, id, p, (const int (*)[2])dcl); ok++; }
-            else fail++;
-            fprintf(ix, "vs %d = %s x %s %s\n", id, vs[v].name, dc[k].name, n > 0 ? "ok" : "REJECTED");
+            char label[160];
+            snprintf(label, sizeof label, "%s x %s", vs[v].name, dc[k].name);
+            emit_pair(dir, ix, p, (const int (*)[2])dcl, label, &id, &ok, &fail);
         }
         if (!paired){ nopair++; fprintf(ix, "%s: no declaration supplies all inputs\n", vs[v].name); }
+        /* FlatOut has no vertex declarations: its car streams are inferred
+         * from the stride.  Check both forms against the CPU interpreter so
+         * the 32/36-byte bring-up has the same numerical evidence as the
+         * declared NFS layouts. */
+        { static const unsigned strides[2] = { 32u, 36u };
+          for (int s = 0; s < 2; s++){
+              int dcl[16][2];
+              if (!flatout_layout(p, strides[s], dcl)) continue;
+              char label[160];
+              snprintf(label, sizeof label, "%s x inferred%u", vs[v].name, strides[s]);
+              emit_pair(dir, ix, p, (const int (*)[2])dcl, label, &id, &ok, &fail);
+          } }
         vs_free(p);
     }
     fclose(ix);
     int gv = game_vectors(dump, dir), pv = game_ps_vectors(dump, dir);
-    printf("%d distinct vertex shaders x %d distinct declarations: %d modules, %d rejected, %d shaders unpaired; "
+    printf("%d distinct vertex shaders x %d distinct declarations (+ inferred 32/36-byte car layouts): "
+           "%d modules, %d rejected, %d shaders unpaired; "
            "test vectors for %d game pairs and %d pixel shader modules\n", nvs, ndc, ok, fail, nopair, gv, pv);
     return fail ? 1 : 0;
 }
