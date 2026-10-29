@@ -269,6 +269,47 @@ static void emit_pair(const char *dir, FILE *ix, const VSProg *p, const int dcl[
     fprintf(ix, "vs %d = %s %s\n", *id, label, n > 0 ? "ok" : "REJECTED");
 }
 
+/* The declaration-less formats, mirroring com.c flatout_inferred_layout: the
+ * shader must declare exactly the format's semantics, so an unknown stream is
+ * not tested as if it were one of these. */
+static int flatout_semantic_layout(const VSProg *p, unsigned stride, int dcl[16][2]){
+    struct { int us, ui, off, type; } want[4];
+    int nw = 0;
+    if (stride == 12u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+    } else if (stride == 24u){
+        want[nw].us = 0;  want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 10; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 4; nw++;
+        want[nw].us = 5;  want[nw].ui = 0; want[nw].off = 16; want[nw].type = 1; nw++;
+    } else if (stride == 28u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 5; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 1; nw++;
+        want[nw].us = 5; want[nw].ui = 1; want[nw].off = 20; want[nw].type = 1; nw++;
+    } else if (stride == 40u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 3; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 2; nw++;
+        want[nw].us = 5; want[nw].ui = 0; want[nw].off = 24; want[nw].type = 1; nw++;
+        want[nw].us = 5; want[nw].ui = 1; want[nw].off = 32; want[nw].type = 1; nw++;
+    } else return 0;
+    for (int i = 0; i < 16; i++){ dcl[i][0] = -1; dcl[i][1] = 0; }
+    int used = 0;
+    for (int us = 0; us < 14; us++)
+        for (int ui = 0; ui < 16; ui++){
+            int rg = vs_input_reg(p, us, ui);
+            if (rg < 0) continue;
+            int k = 0;
+            while (k < nw && (want[k].us != us || want[k].ui != ui)) k++;
+            if (k == nw) return 0;
+            used++;
+        }
+    if (used != nw) return 0;
+    for (int k = 0; k < nw; k++){
+        int rg = vs_input_reg(p, want[k].us, want[k].ui);
+        dcl[rg][0] = want[k].off; dcl[rg][1] = want[k].type;
+    }
+    return 1;
+}
+
 static int pairs(const char *dump, const char *dir){
     DIR *d = opendir(dump);
     if (!d){ perror(dump); return 1; }
@@ -334,6 +375,16 @@ static int pairs(const char *dump, const char *dir){
           for (int s = 0; s < 2; s++){
               int dcl[16][2];
               if (!flatout_layout(p, strides[s], dcl)) continue;
+              char label[160];
+              snprintf(label, sizeof label, "%s x inferred%u", vs[v].name, strides[s]);
+              emit_pair(dir, ix, p, (const int (*)[2])dcl, label, &id, &ok, &fail);
+          } }
+        /* Pos (12), PosColorTex1 (24), PosTex2 (28) and PosNormTex2 (40),
+         * exact semantics only. */
+        { static const unsigned strides[4] = { 12u, 24u, 28u, 40u };
+          for (int s = 0; s < 4; s++){
+              int dcl[16][2];
+              if (!flatout_semantic_layout(p, strides[s], dcl)) continue;
               char label[160];
               snprintf(label, sizeof label, "%s x inferred%u", vs[v].name, strides[s]);
               emit_pair(dir, ix, p, (const int (*)[2])dcl, label, &id, &ok, &fail);

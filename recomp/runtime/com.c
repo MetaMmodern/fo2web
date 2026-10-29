@@ -255,6 +255,11 @@ static uint32_t g_d3d9=0, g_dev=0, g_cur_decl=0, g_cur_fvf=0, g_cur_tex=0;
 #define MAXVS 1024
 static VSProg  *g_vsprog[MAXVS];
 static unsigned g_vsprogn = 1;          /* 0 = "no shader" */
+/* Vertex shader id of the hand-tokenised bootstrap material created in
+ * com_d3dx_effect_create().  Its m4x4 token encoding needs the direct
+ * c0..c3 projection workaround; ordinary 24-byte shaders must not inherit
+ * it.  0 = the fallback shader was never created. */
+static uint32_t g_boot_vs_id = 0;
 void mprot_arm(uint32_t);
 /* CoreAudio output (runtime/audio.m) */
 int      audio_register(uint32_t data, uint32_t bytes, uint32_t rate,
@@ -1222,7 +1227,13 @@ uint32_t com_d3dx_effect_create(CPU *c,uint32_t device,uint32_t source,uint32_t 
         };
         FO2EffectCtx *cx=fo2_effect_ctx(obj);
         if(cx&&cx->vs&&cx->ps){boot_vs=cx->vs;boot_ps=cx->ps;}
-        else {if(!boot_vs)boot_vs=effect_shader_object(0,vs,sizeof vs/sizeof vs[0]);if(!boot_ps)boot_ps=effect_shader_object(1,ps,sizeof ps/sizeof ps[0]);}
+        else {
+            if (!boot_vs){
+                boot_vs = effect_shader_object(0, vs, sizeof vs/sizeof vs[0]);
+                if (boot_vs) g_boot_vs_id = boot_vs;
+            }
+            if (!boot_ps) boot_ps = effect_shader_object(1, ps, sizeof ps/sizeof ps[0]);
+        }
         if(cx&&cx->vs)boot_vs=cx->vs;if(cx&&cx->ps)boot_ps=cx->ps;
         MR32(obj+16)=boot_vs; MR32(obj+20)=boot_ps;
     }
@@ -1435,6 +1446,21 @@ static int g_gpuvs = -1;
 static uint64_t g_gpuvs_draws = 0, g_gpuvs_fail = 0, g_gpuvs_drop = 0;
 /* Inferred-layout accounting for the exit summary (no per-draw log). */
 static uint64_t g_gpuvs_inferred = 0, g_gpuvs_inferred_fail = 0;
+/* Inferred declaration-less stream kinds: 0=12, 1=24, 2=28, 3=40 bytes.
+ * g_inf_* record matched draws by vertex path; g_inf_miss counts sizes whose
+ * shader did not match the authored format.  Exit summary only. */
+static uint64_t g_inf_miss[4] = { 0, 0, 0, 0 };
+static uint64_t g_inf_gpu[4] = { 0, 0, 0, 0 }, g_inf_cpu[4] = { 0, 0, 0, 0 };
+static const uint32_t g_inf_stride[4] = { 12u, 24u, 28u, 40u };
+static int inf_kind(uint32_t stride){
+    switch (stride){
+    case 12u: return 0;
+    case 24u: return 1;
+    case 28u: return 2;
+    case 40u: return 3;
+    default:  return -1;
+    }
+}
 
 static void gvs_signature(const DElem *el, int nel, int16_t sig[16][2]){
     for (int i = 0; i < 16; i++){ sig[i][0] = -1; sig[i][1] = 0; }
@@ -1916,6 +1942,66 @@ static void draw_lines(const TVert *tv, uint32_t nv, uint32_t pt){
  * it returns 0 and the caller falls back to the old (index expansion) path. */
 static struct { uint32_t n, vbo, ibo, isz; int32_t base; uint64_t gh; } g_ix;
 static uint64_t g_dip_ix = 0, g_dip_ixfb[6];
+#ifdef FLATOUT2
+/* Declaration-less FlatOut streams.  A stride alone cannot identify a format
+ * (another layout can share it), so resolve by the semantics the shader itself
+ * declares.  The formats come from the authored shaders:
+ *   Pos         12 bytes: POSITION0 @0 FLOAT3                       (rendertarget shadow)
+ *   PosColorTex1 24 bytes: POSITION0 @0, COLOR0 @12 D3DCOLOR,
+ *                          TEXCOORD0 @16 FLOAT2                    (dynamic shadow / HUD)
+ *   PosTex2     28 bytes: POSITION0 @0, TEXCOORD0 @12, TEXCOORD1 @20 (lightmapped terrain)
+ *   PosNormTex2 40 bytes: POSITION0 @0, NORMAL0 @12,
+ *                          TEXCOORD0 @24, TEXCOORD1 @32             (specular terrain)
+ * pro_rendertarget_shadow.sha, pro_shadow_dynamic.sha and
+ * pro_lightmapped*.sha put the register numbers in different places; they are
+ * always resolved through vs_input_reg, never assumed.
+ *
+ * Requiring the declared inputs to be exactly the format's semantics (no
+ * extra usage, every semantic present, no register reused) keeps an unknown
+ * stream on the reported fallback instead of feeding it the wrong offsets.
+ * Returns the number of elements, 0 when it does not match. */
+static int flatout_inferred_layout(const VSProg *prog, uint32_t stride, DElem *el){
+    struct { int us, ui, off, type; } want[4];
+    int nw = 0;
+    if (stride == 12u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+    } else if (stride == 24u){
+        want[nw].us = 0;  want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 10; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 4; nw++;
+        want[nw].us = 5;  want[nw].ui = 0; want[nw].off = 16; want[nw].type = 1; nw++;
+    } else if (stride == 28u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 5; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 1; nw++;
+        want[nw].us = 5; want[nw].ui = 1; want[nw].off = 20; want[nw].type = 1; nw++;
+    } else if (stride == 40u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 3; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 2; nw++;
+        want[nw].us = 5; want[nw].ui = 0; want[nw].off = 24; want[nw].type = 1; nw++;
+        want[nw].us = 5; want[nw].ui = 1; want[nw].off = 32; want[nw].type = 1; nw++;
+    } else return 0;
+
+    int used = 0, regs = 0;
+    for (int us = 0; us < 14; us++)
+        for (int ui = 0; ui < 16; ui++){
+            int rg = vs_input_reg(prog, us, ui);
+            if (rg < 0) continue;
+            int k = 0;
+            while (k < nw && (want[k].us != us || want[k].ui != ui)) k++;
+            if (k == nw || rg > 15 || (regs & (1 << rg))) return 0;
+            regs |= 1 << rg;
+            used++;
+        }
+    if (used != nw) return 0;            /* the shader wants more/less than this format */
+
+    for (int k = 0; k < nw; k++){
+        int rg = vs_input_reg(prog, want[k].us, want[k].ui);
+        el[k].off = (uint16_t)want[k].off;
+        el[k].type = (uint8_t)want[k].type;
+        el[k].reg = (int8_t)rg;
+    }
+    return nw;
+}
+#endif
 static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     uint64_t _t0 = now_ns();
     static TVert tv[4096];
@@ -1938,9 +2024,9 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
      * (~1300 times per frame).  Safe: declaration objects are copied when
      * created and never change, and com_alloc does not reuse addresses. */
     static struct { uint32_t decl, stride; const VSProg *prog; int nel, p_off, p_type, c_off, c_type,
-                    t_off, t_type, implicit_layout, ok; DElem el[16]; } dcc[64];
+                    t_off, t_type, implicit_layout, inferred_fmt, ok; DElem el[16]; } dcc[64];
     uint32_t d = g_cur_decl;
-    int implicit_layout = 0;
+    int implicit_layout = 0, inferred_fmt = 0;
     unsigned dci = (unsigned)(((uintptr_t)prog >> 4) ^ (d >> 3) ^ (d >> 11) ^ stride) & 63u;
     int dlog = ENVC("DECLLOG") != NULL;
     if (dlog || !dcc[dci].ok || dcc[dci].decl != d || dcc[dci].stride != stride || dcc[dci].prog != prog){
@@ -1986,15 +2072,40 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
         }
     }
 #ifdef FLATOUT2
-    /* FlatOut also draws without a D3D declaration. The 24-byte bootstrap
-     * quad and the 32/36-byte car streams have different layouts. Treating
-     * every stride >= 24 as the quad read car normals as UVs and color. */
-    if (!ep && prog && stride == 24u){
-        el[0].off = 0;  el[0].type = 2; el[0].reg = 0;
-        el[1].off = 12; el[1].type = 4; el[1].reg = 2;
-        el[2].off = 16; el[2].type = 1; el[2].reg = 3;
-        nel = 3;
-        implicit_layout = 1;     /* quad needs its direct c0..c3 projection */
+    /* FlatOut also draws without a D3D declaration.  The 24-byte bootstrap
+     * quad, the 28/40-byte terrain streams and the 32/36-byte car streams
+     * have different layouts.  Treating every stride >= 24 as the quad read
+     * car normals as UVs and color. */
+    if (!ep && prog && (stride == 12u || stride == 24u || stride == 28u || stride == 40u)){
+        int n = flatout_inferred_layout(prog, stride, el);
+        int k = inf_kind(stride);
+        if (n > 0){
+            nel = n;
+            /* The hand-tokenised bootstrap material is the only shader that
+             * needs the direct c0..c3 projection after vs_run.  Identify it
+             * by the id its creation path assigned, never by the 24-byte
+             * stride (pro_shadow_dynamic and other UI/world shaders share it). */
+            implicit_layout = (stride == 24u && g_boot_vs_id && g_cur_vs == g_boot_vs_id) ? 1 : 2;
+            if (k >= 0) inferred_fmt = k + 1;
+        } else {
+            /* The stride says nothing on its own.  Report the first mismatch
+             * of each size once, then keep it on the existing fallback. */
+            if (k >= 0) inferred_fmt = -(k + 1);            /* remembered per draw */
+            static unsigned reported;
+            unsigned bit = k >= 0 ? 1u << k : 0u;
+            if (bit && !(reported & bit)){
+                reported |= bit;
+                fprintf(stderr, "[layout] stride %u shader=%u: declared inputs", stride, g_cur_vs);
+                int any = 0;
+                for (int us = 0; us < 14; us++)
+                    for (int ui = 0; ui < 16; ui++){
+                        int rg = vs_input_reg(prog, us, ui);
+                        if (rg >= 0){ fprintf(stderr, " usage=%d/%d->v%d", us, ui, rg); any = 1; }
+                    }
+                if (!any) fprintf(stderr, " none");
+                fprintf(stderr, "; not a supported declaration-less layout, left on the fixed-function fallback (no vertex shader)\n");
+            }
+        }
     } else if (!ep && prog && (stride == 32u || stride == 36u)){
         int rg;
         rg = vs_input_reg(prog, 0, 0);   /* POSITION */
@@ -2018,9 +2129,14 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     dcc[dci].p_off = p_off; dcc[dci].p_type = p_type; dcc[dci].c_off = c_off;
     dcc[dci].c_type = c_type; dcc[dci].t_off = t_off; dcc[dci].t_type = t_type;
     dcc[dci].implicit_layout = implicit_layout;
+    dcc[dci].inferred_fmt = inferred_fmt;
     memcpy(dcc[dci].el, el, sizeof el); dcc[dci].ok = 1;
     }
     implicit_layout = dcc[dci].implicit_layout;
+    /* inferred_fmt: 1..4 = 12/24/28/40-byte layout matched, -1..-4 = same
+     * size unmatched, 0 = not a declaration-less candidate. */
+    int inf_matched = dcc[dci].inferred_fmt > 0 ? dcc[dci].inferred_fmt - 1 : -1;
+    int inf_missed  = dcc[dci].inferred_fmt < 0 ? -dcc[dci].inferred_fmt - 1 : -1;
     const DElem *el = dcc[dci].el; int nel = dcc[dci].nel;
     int p_off = dcc[dci].p_off, p_type = dcc[dci].p_type, c_off = dcc[dci].c_off,
         c_type = dcc[dci].c_type, t_off = dcc[dci].t_off, t_type = dcc[dci].t_type;
@@ -2099,6 +2215,7 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
                 if (metal_draw_ix(g_ix.vbo, stride, g_ix.ibo, g_ix.isz, g_ix.n, g_ix.base,
                                   g_cur_tex, gid, &vsk->f[0][0], (unsigned)g_gvs_nk[gid], g_ix.gh)){
                     g_vs_draws++; g_gpuvs_draws++; g_v_xform += nv;
+                    if (inf_matched >= 0) g_inf_gpu[inf_matched]++;
                     g_t_draw_ns += now_ns() - _t0;
                     return 1;
                 }
@@ -2108,6 +2225,7 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
             if (metal_draw_raw(g_mem + vp, nv, stride, pt, g_cur_tex, gid,
                                &vsk->f[0][0], (unsigned)g_gvs_nk[gid])){
                 g_vs_draws++; g_gpuvs_draws++; g_v_xform += nv;
+                if (inf_matched >= 0) g_inf_gpu[inf_matched]++;
                 g_t_draw_ns += now_ns() - _t0;
                 return 1;
             }
@@ -2119,6 +2237,8 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
         else if (implicit_layout == 2) g_gpuvs_inferred_fail++;
     }
     if (g_ix.n) return 0;           /* an indexed source cannot go to the CPU path */
+    if (implicit_layout == 2 && inf_matched >= 0) g_inf_cpu[inf_matched]++;
+    else if (inf_missed >= 0) g_inf_miss[inf_missed]++;
 
     for (uint32_t i = 0; i < nv; i++){
         uint32_t o = vp + i*stride;
@@ -2180,10 +2300,15 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
              * operation is simply v0 dotted with c0..c3; do that directly
              * here, preserving FlatOut's exact screen projection. */
             if (implicit_layout == 1){
-                for (int q = 0; q < 4; q++)
-                    so.pos[q] = v[0][0]*vsk->f[q][0] + v[0][1]*vsk->f[q][1]
-                              + v[0][2]*vsk->f[q][2] + v[0][3]*vsk->f[q][3];
-                for (int q = 0; q < 4; q++){ so.col[0][q] = v[2][q]; so.tex[0][q] = v[3][q]; }
+                int pr = vs_input_reg(prog, 0, 0);    /* POSITION */
+                int cr = vs_input_reg(prog, 10, 0);   /* COLOR0 */
+                int tr = vs_input_reg(prog, 5, 0);    /* TEXCOORD0 */
+                if (pr >= 0)
+                    for (int q = 0; q < 4; q++)
+                        so.pos[q] = v[pr][0]*vsk->f[q][0] + v[pr][1]*vsk->f[q][1]
+                                  + v[pr][2]*vsk->f[q][2] + v[pr][3]*vsk->f[q][3];
+                if (cr >= 0) for (int q = 0; q < 4; q++) so.col[0][q] = v[cr][q];
+                if (tr >= 0) for (int q = 0; q < 4; q++) so.tex[0][q] = v[tr][q];
             }
 #endif
             out->x=so.pos[0]; out->y=so.pos[1]; out->z=so.pos[2]; out->w=so.pos[3];
@@ -5555,6 +5680,23 @@ void com_report(void){
         fprintf(stderr,"  inferred layouts  : %llu layout attempts on the GPU, %llu fell back to the CPU\n",
                 (unsigned long long)g_gpuvs_inferred,
                 (unsigned long long)g_gpuvs_inferred_fail);
+    { int any = 0, miss = 0;
+      for (int k = 0; k < 4; k++){ if (g_inf_gpu[k] || g_inf_cpu[k]) any = 1; if (g_inf_miss[k]) miss = 1; }
+      if (any){
+          fprintf(stderr,"  inferred meshes   :");
+          for (int k = 0; k < 4; k++)
+              if (g_inf_gpu[k] || g_inf_cpu[k])
+                  fprintf(stderr," %ub %lluG/%lluC", g_inf_stride[k],
+                          (unsigned long long)g_inf_gpu[k], (unsigned long long)g_inf_cpu[k]);
+          fprintf(stderr,"\n");
+      }
+      if (miss){
+          fprintf(stderr,"  inferred fallbacks:");
+          for (int k = 0; k < 4; k++)
+              if (g_inf_miss[k])
+                  fprintf(stderr," %ub %llu", g_inf_stride[k], (unsigned long long)g_inf_miss[k]);
+          fprintf(stderr," (fixed-function: no vertex shader)\n");
+      } }
     fprintf(stderr,"  indexed draws      : %llu from the pool, old path: strip/fan %llu, object %llu, new lock %llu, "
             "align/bounds %llu, mirror %llu, index out of range %llu\n",
             (unsigned long long)g_dip_ix, (unsigned long long)g_dip_ixfb[0], (unsigned long long)g_dip_ixfb[1],
