@@ -1407,25 +1407,66 @@ static inline uint64_t now_ns(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
 }
-/* GPU shader id for a (vertex shader, vertex declaration) pair.  The
- * same bytecode can be used with different declarations, so the key is
- * the two together. */
+/* GPU shader id for one baked vertex-fetch layout.  The same bytecode can be
+ * used with several layouts: FlatOut's declaration-less car meshes arrive as
+ * 32-byte Pos/Normal/UV and 36-byte Pos/Normal/Color/UV streams with different
+ * register assignments.  The declaration handle cannot identify those (it is
+ * zero for every inferred layout), so the key is the shader id, the stride,
+ * and the resolved (register -> offset,type) map.  Including the stride is
+ * conservative: it keeps two layouts with identical elements but different
+ * byte strides from sharing a translation whose GH.x stride is baked in.
+ *
+ * state: 0 = translation rejected (never retried for this exact key),
+ *        1 = ready (gid is registered with the renderer).  A negative entry is
+ * scoped to its own key, so an unsupported layout does not disable another
+ * layout of the same shader. */
 #define MAXGVS 256
-static struct { uint32_t vs, decl; int gid, state; } g_gvs[MAXGVS];
+typedef struct {
+    uint32_t vs, stride;
+    int gid, state;
+    int nel;
+    DElem el[16];
+    int16_t sig[16][2];              /* canonical per-register layout, -1 = unused */
+} GVSLayout;
+static GVSLayout g_gvs[MAXGVS];
 static int g_gvsn = 0, g_gvs_next = 1;
 static int g_gvs_nk[MAXGVS];
 static int g_gpuvs = -1;
 static uint64_t g_gpuvs_draws = 0, g_gpuvs_fail = 0, g_gpuvs_drop = 0;
+/* Inferred-layout accounting for the exit summary (no per-draw log). */
+static uint64_t g_gpuvs_inferred = 0, g_gpuvs_inferred_fail = 0;
+
+static void gvs_signature(const DElem *el, int nel, int16_t sig[16][2]){
+    for (int i = 0; i < 16; i++){ sig[i][0] = -1; sig[i][1] = 0; }
+    /* last element wins, matching the dcl[] construction below and the CPU
+     * interpreter's decl_fetch loop */
+    for (int k = 0; k < nel; k++){
+        int rg = el[k].reg;
+        if (rg >= 0 && rg < 16){ sig[rg][0] = (int16_t)el[k].off; sig[rg][1] = (int16_t)el[k].type; }
+    }
+}
+static int gvs_same(const GVSLayout *e, uint32_t vs, uint32_t stride,
+                    const int16_t sig[16][2]){
+    if (e->vs != vs || e->stride != stride) return 0;
+    for (int i = 0; i < 16; i++)
+        if (e->sig[i][0] != sig[i][0] || e->sig[i][1] != sig[i][1]) return 0;
+    return 1;
+}
 
 static int gpuvs_id(const VSProg *prog, uint32_t vs, uint32_t decl,
-                    const DElem *el, int nel){
+                    const DElem *el, int nel, uint32_t stride){
+    int16_t sig[16][2];
+    gvs_signature(el, nel, sig);
     for (int i = 0; i < g_gvsn; i++)
-        if (g_gvs[i].vs == vs && g_gvs[i].decl == decl)
+        if (gvs_same(&g_gvs[i], vs, stride, sig))
             return g_gvs[i].state > 0 ? g_gvs[i].gid : -1;
     if (g_gvsn >= MAXGVS || g_gvs_next >= MAXGVS) return -1;
     int slot = g_gvsn++;
-    g_gvs[slot].vs = vs; g_gvs[slot].decl = decl;
-    g_gvs[slot].state = -1; g_gvs[slot].gid = 0;
+    GVSLayout *ent = &g_gvs[slot];
+    ent->vs = vs; ent->stride = stride;
+    ent->nel = nel; memcpy(ent->el, el, (size_t)nel * sizeof el[0]);
+    memcpy(ent->sig, sig, sizeof sig);
+    ent->state = 0; ent->gid = 0;
 
     int dcl[16][2];
     for (int i = 0; i < 16; i++){ dcl[i][0] = -1; dcl[i][1] = 0; }
@@ -1458,7 +1499,7 @@ static int gpuvs_id(const VSProg *prog, uint32_t vs, uint32_t decl,
     metal_register_vs(gid, msl);
     if (!metal_vs_ready(gid)){ g_gpuvs_fail++; return -1; }
     g_gvs_next++;
-    g_gvs[slot].gid = gid; g_gvs[slot].state = 1;
+    ent->gid = gid; ent->state = 1;
     g_gvs_nk[gid] = vs_kmax(prog);
 #ifdef __wasm__
     /* the falloff of a lit shader (oT2.x = s * w + o) for the other cars' headlights */
@@ -2036,8 +2077,14 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
      * silently wrong: vs_to_msl returns 0 and we fall back to the proven CPU path.
      * Lines take the CPU path: draw_lines widens them from the transformed vertices. */
     int lines = (pt == 2u || pt == 3u);
-    if (prog && nel && !implicit_layout && stride && stride <= 256u && g_gpuvs && !lines){
-        int gid = gpuvs_id(prog, g_cur_vs, g_cur_decl, el, nel);
+    /* Layout 0 = an explicit D3D declaration, layout 2 = FlatOut's inferred
+     * 32/36-byte car streams.  Both have a resolved register map now, so both
+     * are baked into a WGSL fetch.  Layout 1 is the declaration-less startup
+     * quad whose direct c0..c3 projection the CPU path applies after the
+     * shader; it stays on the CPU. */
+    if (prog && nel && implicit_layout != 1 && stride && stride <= 256u && g_gpuvs && !lines){
+        int gid = gpuvs_id(prog, g_cur_vs, g_cur_decl, el, nel, stride);
+        if (implicit_layout == 2) g_gpuvs_inferred++;
         if (gid > 0){
             int  metal_draw_raw(const void*, unsigned, unsigned, unsigned,
                                 unsigned, int, const float*, unsigned);
@@ -2055,6 +2102,7 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
                     g_t_draw_ns += now_ns() - _t0;
                     return 1;
                 }
+                if (implicit_layout == 2) g_gpuvs_inferred_fail++;
                 return 0;
             }
             if (metal_draw_raw(g_mem + vp, nv, stride, pt, g_cur_tex, gid,
@@ -2066,7 +2114,9 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
             /* Could not be queued (arena overflow): let the CPU path carry on --
              * silently dropping it made geometry disappear. */
             g_gpuvs_drop++;
+            if (implicit_layout == 2) g_gpuvs_inferred_fail++;
         }
+        else if (implicit_layout == 2) g_gpuvs_inferred_fail++;
     }
     if (g_ix.n) return 0;           /* an indexed source cannot go to the CPU path */
 
@@ -5498,9 +5548,13 @@ void com_report(void){
             (unsigned long long)g_sb_captured, (unsigned long long)g_sb_dropped,
             (unsigned long long)g_sb_full);
     fprintf(stderr,"  GPU vertex shaders: %llu draws on the GPU, %llu translations rejected,"
-            " %d/%d (shader,decl) pairs registered\n",
+            " %d/%d layout keys registered\n",
             (unsigned long long)g_gpuvs_draws, (unsigned long long)g_gpuvs_fail,
             g_gvs_next-1, g_gvsn);
+    if (g_gpuvs_inferred)
+        fprintf(stderr,"  inferred layouts  : %llu layout attempts on the GPU, %llu fell back to the CPU\n",
+                (unsigned long long)g_gpuvs_inferred,
+                (unsigned long long)g_gpuvs_inferred_fail);
     fprintf(stderr,"  indexed draws      : %llu from the pool, old path: strip/fan %llu, object %llu, new lock %llu, "
             "align/bounds %llu, mirror %llu, index out of range %llu\n",
             (unsigned long long)g_dip_ix, (unsigned long long)g_dip_ixfb[0], (unsigned long long)g_dip_ixfb[1],

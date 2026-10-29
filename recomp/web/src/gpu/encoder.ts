@@ -121,6 +121,8 @@ export class Encoder {
 
   // stats
   totalDraws = 0; totalPasses = 0; pipelinesMade = 0; missingTarget = 0; noVs = 0; zMismatch = 0; conflicts = 0;
+  /** draws that actually ran the GPU vertex shader (vsid > 0: raw or indexed), and their vertices */
+  gpuVsDraws = 0; gpuVsVerts = 0;
   /** the game's textures on the GPU, bytes: all of them, those unpacked from DXT and those DXT1 as ASTC (no
    *  texture-compression-bc) */
   texBytes = 0; unpackBytes = 0; astcBytes = 0;
@@ -788,6 +790,7 @@ export class Encoder {
         p.drawIndexed(count, 1, u32[w + D.ixIb] / isz, i32[w + D.ixBase], kb);
       } else if (vsid > 0) p.draw(count, 1, 0, kb);
       else p.draw(count, 1, u32[w + D.first], 0);
+      if (vsid > 0) { this.gpuVsDraws++; this.gpuVsVerts += count; }
       draws++; this.calls.draw++;
       if (tr) tr.push(`  #${i} ${isz ? `ix${isz * 8} ib ${u32[w + D.ixIb]} base ${i32[w + D.ixBase]}` : vsid > 0 ? 'raw' : `tvert ${u32[w + D.first]}`} n ${count} vs ${vsid} ps ${psid}${psEff !== psid ? `->${psEff}` : ''} blend ${blend.toString(16)} depth ${(depth & 63).toString(16)}${realZ ? '' : '(off)'} cull ${cull} aref ${aref.toFixed(3)} bcol ${bcol.toString(16)} tex ${t0}${v0.serial === 0 && t0 ? '(white)' : ''},${t1},${t2},${t3} smp ${s0.toString(16)} koff ${koff} kb ${kb} poff ${poff}`);
     }

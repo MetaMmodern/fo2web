@@ -37,6 +37,7 @@ export const attachRenderer: AttachRenderer = async (proc, canvas, o) => {
     stats: () => {
       const s = r.stats();
       return { 'gpu encode ms': s.encodeMsAvg, 'draws': s.drawsLast, 'passes': s.passesLast, 'pipelines': s.pipelines,
+        'gpu vertex draws': s.gpuVsDraws, 'gpu vertex vertices': s.gpuVsVerts,
         'gpu errors': s.errors, 'missing targets': s.missingTarget, 'draw conflicts': s.conflicts,
         'depth mismatches': s.zMismatch, 'missing vertex shaders': s.noVs };
     },
