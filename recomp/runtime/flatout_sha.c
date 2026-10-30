@@ -65,27 +65,86 @@ static uint32_t regtok(const char *in,int dst,int pixel){
 }
 static unsigned op(const char *s){if(!strcasecmp(s,"mov"))return MOV;if(!strcasecmp(s,"add"))return ADD;if(!strcasecmp(s,"sub"))return SUB;if(!strcasecmp(s,"mad"))return MAD;if(!strcasecmp(s,"mul"))return MUL;if(!strcasecmp(s,"rcp"))return RCP;if(!strcasecmp(s,"rsq"))return RSQ;if(!strcasecmp(s,"dp3"))return DP3;if(!strcasecmp(s,"dp4"))return DP4;if(!strcasecmp(s,"min"))return MIN;if(!strcasecmp(s,"max"))return MAX;if(!strcasecmp(s,"slt"))return SLT;if(!strcasecmp(s,"sge"))return SGE;if(!strcasecmp(s,"lrp"))return LRP;if(!strcasecmp(s,"frc"))return FRC;if(!strcasecmp(s,"m4x4"))return M4X4;if(!strcasecmp(s,"m4x3"))return M4X3;if(!strcasecmp(s,"m3x3"))return M3X3;if(!strcasecmp(s,"abs"))return ABS;if(!strcasecmp(s,"nrm"))return NRM;if(!strcasecmp(s,"tex"))return TEX;if(!strcasecmp(s,"texcoord"))return TEXCOORD;if(!strcasecmp(s,"texkill"))return TEXKILL;if(!strcasecmp(s,"texreg2ar"))return TEXREG2AR;if(!strcasecmp(s,"dcl"))return DCL;return 0;}
 static unsigned usage(const char *s){if(!strncasecmp(s,"dcl_position",12))return 0;if(!strncasecmp(s,"dcl_blendweight",15))return 1;if(!strncasecmp(s,"dcl_blendindices",15))return 2;if(!strncasecmp(s,"dcl_normal",10))return 3;if(!strncasecmp(s,"dcl_texcoord",12))return 5|((unsigned)atoi(s+12)<<16);if(!strncasecmp(s,"dcl_color",9))return 10;return 0;}
-static int state_value(const char *s){
-    if(!strcasecmp(s,"TRUE"))return 1; if(!strcasecmp(s,"FALSE"))return 0;
-    if(!strcasecmp(s,"ONE"))return 2; if(!strcasecmp(s,"ZERO"))return 1;
-    if(!strcasecmp(s,"SRCALPHA"))return 5; if(!strcasecmp(s,"INVSRCALPHA"))return 6;
-    if(!strcasecmp(s,"DESTALPHA"))return 7; if(!strcasecmp(s,"INVDESTALPHA"))return 8;
-    if(!strcasecmp(s,"SRCOLOR"))return 3; if(!strcasecmp(s,"INVSRCCOLOR"))return 4;
-    if(!strcasecmp(s,"DESTCOLOR"))return 9; if(!strcasecmp(s,"INVDESTCOLOR"))return 10;
-    if(!strcasecmp(s,"ADD"))return 1; if(!strcasecmp(s,"SUBTRACT"))return 2;
-    if(!strcasecmp(s,"REVSUBTRACT"))return 3; if(!strcasecmp(s,"MODULATE"))return 4;
-    if(!strcasecmp(s,"SELECTARG1"))return 2; if(!strcasecmp(s,"SELECTARG2"))return 3;
-    if(!strcasecmp(s,"CURRENT"))return 1; if(!strcasecmp(s,"DIFFUSE"))return 0;
-    if(!strcasecmp(s,"TEXTURE"))return 2; if(!strcasecmp(s,"TFactor"))return 3;
-    if(!strcasecmp(s,"SPECULAR"))return 4;
-    if(!strcasecmp(s,"DISABLE"))return 1; if(!strcasecmp(s,"CLAMP"))return 3;
-    if(!strcasecmp(s,"WRAP"))return 1; if(!strcasecmp(s,"POINT"))return 1;
-    if(!strcasecmp(s,"LINEAR"))return 2; if(!strcasecmp(s,"NONE"))return 1;
-    if(!strcasecmp(s,"LESSEQUAL"))return 4; if(!strcasecmp(s,"CCW"))return 3;
-    if(!strcasecmp(s,"CW"))return 2; return (int)strtol(s,0,0);
+/* Parse one effect constant initializer: float4(x, y, z, w).  Each component
+ * is a C-style float with optional whitespace and sign; shipped .sha files
+ * also suffix components with f/F (float4(0.75f, 0.75f, 0.75f, 0.75f)), which
+ * plain "%f" parsing silently truncates at the suffix.  Return 1 only for a
+ * complete four-component value, optionally followed by a semicolon and/or a
+ * //-comment, so partial or malformed initializers are not recorded. */
+static int parse_float4(const char *s,float v[4]){
+    while(isspace((unsigned char)*s))s++;
+    if(strncasecmp(s,"float4",6))return 0;
+    s+=6;
+    while(isspace((unsigned char)*s))s++;
+    if(*s++!='(')return 0;
+    for(int i=0;i<4;i++){
+        while(isspace((unsigned char)*s))s++;
+        char *end=0;
+        float f=strtof(s,&end);
+        if(end==s)return 0;
+        v[i]=f;
+        s=end;
+        if(*s=='f'||*s=='F')s++;
+        if(i<3){
+            while(isspace((unsigned char)*s))s++;
+            if(*s++!=',')return 0;
+        }
+    }
+    while(isspace((unsigned char)*s))s++;
+    if(*s++!=')')return 0;
+    while(isspace((unsigned char)*s))s++;
+    if(*s==';'){s++;while(isspace((unsigned char)*s))s++;}
+    if(s[0]=='/'&&s[1]=='/')return 1;
+    return *s==0;
 }
+/* Parse one pass state value.  The value in a pass body keeps the line's
+ * trailing semicolon and optional // comment, so normalise those away before
+ * looking at the token.  Symbolic values are matched case-insensitively; a
+ * numeric value must consume the whole token, otherwise malformed input is
+ * rejected instead of being turned into an unrelated state value (the old
+ * strtol("Clamp;") path silently produced 0).
+ *
+ * NONE is context-sensitive: D3DTEXF_NONE is 0 and is only valid for the mip
+ * filter, while D3DCULL_NONE is 1.  mipfilter selects the filter meaning. */
+static int state_value(const char *s,uint32_t *out,int mipfilter){
+    const char *end=s+strlen(s);
+    for(const char *q=s;q+1<end;q++)if(q[0]=='/'&&q[1]=='/'){end=q;break;}
+    while(s<end&&isspace((unsigned char)*s))s++;
+    while(end>s&&isspace((unsigned char)end[-1]))end--;
+    if(end>s&&end[-1]==';'){end--;while(end>s&&isspace((unsigned char)end[-1]))end--;}
+    size_t n=(size_t)(end-s);
+    if(!n)return 0;
+#define SV(lit,val) if(n==sizeof(lit)-1&&!strncasecmp(s,lit,n)){*out=(uint32_t)(val);return 1;}
+    SV("TRUE",1) SV("FALSE",0)
+    SV("ONE",2) SV("ZERO",1)
+    SV("SRCALPHA",5) SV("INVSRCALPHA",6)
+    SV("DESTALPHA",7) SV("INVDESTALPHA",8)
+    SV("SRCOLOR",3) SV("INVSRCCOLOR",4)
+    SV("DESTCOLOR",9) SV("INVDESTCOLOR",10)
+    SV("ADD",1) SV("SUBTRACT",2)
+    SV("REVSUBTRACT",3) SV("MODULATE",4)
+    SV("SELECTARG1",2) SV("SELECTARG2",3)
+    SV("CURRENT",1) SV("DIFFUSE",0)
+    SV("TEXTURE",2) SV("TFactor",3)
+    SV("SPECULAR",4)
+    SV("DISABLE",1) SV("CLAMP",3)
+    SV("WRAP",1) SV("POINT",1)
+    SV("LINEAR",2) SV("NONE",mipfilter?0:1)
+    SV("LESSEQUAL",4) SV("CCW",3)
+    SV("CW",2)
+#undef SV
+    char b[64];
+    if(n>=sizeof b)return 0;
+    memcpy(b,s,n);b[n]=0;
+    char *e=0;long v=strtol(b,&e,0);
+    if(e!=b+n)return 0;
+    *out=(uint32_t)v;return 1;
+}
+static void st_smp(FO2ShaPassState *st,unsigned stage,unsigned slot,uint32_t v){st->smp[stage][slot]=v;st->smp_mask[stage]|=1u<<slot;}
+static void st_tss(FO2ShaPassState *st,unsigned stage,unsigned slot,uint32_t v){st->tss[stage][slot]=v;st->tss_mask[stage]|=1ull<<slot;}
+static void st_rs(FO2ShaPassState *st,unsigned slot,uint32_t v){st->rs[slot]=v;st->rs_mask[slot>>5]|=1u<<(slot&31);}
 static int pass_state(Pass *p,const char *lhs,const char *rhs){
-    int stage=-1,slot=-1;
+    int stage=-1,slot=-1;uint32_t v;
     if(sscanf(lhs,"AddressU[%d]",&stage)==1) slot=1;
     else if(sscanf(lhs,"AddressV[%d]",&stage)==1) slot=2;
     else if(sscanf(lhs,"MagFilter[%d]",&stage)==1) slot=5;
@@ -94,7 +153,7 @@ static int pass_state(Pass *p,const char *lhs,const char *rhs){
     else if(sscanf(lhs,"TexCoordIndex[%d]",&stage)==1) slot=11;
     else if(!strcasecmp(lhs,"AddressU")){stage=0;slot=1;}
     else if(!strcasecmp(lhs,"AddressV")){stage=0;slot=2;}
-    if(stage>=0 && stage<4 && slot>=0){ p->st.smp[stage][slot]=(uint32_t)state_value(rhs); p->st.smp_mask[stage]|=1u<<slot; if(slot==11){p->st.tss[stage][11]=(uint32_t)state_value(rhs);p->st.tss_mask[stage]|=1ull<<11;} return 1; }
+    if(stage>=0 && stage<4 && slot>=0){ if(state_value(rhs,&v,slot==7)){st_smp(&p->st,(unsigned)stage,(unsigned)slot,v);if(slot==11)st_tss(&p->st,(unsigned)stage,11,v);} return 1; }
     stage=-1; slot=-1;
     if(sscanf(lhs,"ColorOp[%d]",&stage)==1) slot=1;
     else if(sscanf(lhs,"ColorArg1[%d]",&stage)==1) slot=2;
@@ -102,15 +161,15 @@ static int pass_state(Pass *p,const char *lhs,const char *rhs){
     else if(sscanf(lhs,"AlphaOp[%d]",&stage)==1) slot=4;
     else if(sscanf(lhs,"AlphaArg1[%d]",&stage)==1) slot=5;
     else if(sscanf(lhs,"AlphaArg2[%d]",&stage)==1) slot=6;
-    if(stage>=0 && stage<4 && slot>=0){p->st.tss[stage][slot]=(uint32_t)state_value(rhs);p->st.tss_mask[stage]|=1ull<<slot;return 1;}
-    if(!strncasecmp(lhs,"TextureFactor",13)){p->st.rs[60]=(uint32_t)state_value(rhs);p->st.rs_mask[60>>5]|=1u<<(60&31);return 1;}
-    if(!strcasecmp(lhs,"SrcBlend")){p->st.rs[19]=(uint32_t)state_value(rhs);p->st.rs_mask[19>>5]|=1u<<(19&31);return 1;}
-    if(!strcasecmp(lhs,"DestBlend")){p->st.rs[20]=(uint32_t)state_value(rhs);p->st.rs_mask[20>>5]|=1u<<(20&31);return 1;}
-    if(!strcasecmp(lhs,"AlphaBlendEnable")){p->st.rs[27]=(uint32_t)state_value(rhs);p->st.rs_mask[27>>5]|=1u<<(27&31);return 1;}
-    if(!strcasecmp(lhs,"ZWriteEnable")){p->st.rs[14]=(uint32_t)state_value(rhs);p->st.rs_mask[14>>5]|=1u<<(14&31);return 1;}
-    if(!strcasecmp(lhs,"ZEnable")){p->st.rs[7]=(uint32_t)state_value(rhs);p->st.rs_mask[7>>5]|=1u<<(7&31);return 1;}
-    if(!strcasecmp(lhs,"CullMode")){p->st.rs[22]=(uint32_t)state_value(rhs);p->st.rs_mask[22>>5]|=1u<<(22&31);return 1;}
-    if(!strcasecmp(lhs,"AlphaTestEnable")){p->st.rs[15]=(uint32_t)state_value(rhs);p->st.rs_mask[15>>5]|=1u<<(15&31);return 1;}
+    if(stage>=0 && stage<4 && slot>=0){if(state_value(rhs,&v,0))st_tss(&p->st,(unsigned)stage,(unsigned)slot,v);return 1;}
+    if(!strncasecmp(lhs,"TextureFactor",13)){if(state_value(rhs,&v,0))st_rs(&p->st,60,v);return 1;}
+    if(!strcasecmp(lhs,"SrcBlend")){if(state_value(rhs,&v,0))st_rs(&p->st,19,v);return 1;}
+    if(!strcasecmp(lhs,"DestBlend")){if(state_value(rhs,&v,0))st_rs(&p->st,20,v);return 1;}
+    if(!strcasecmp(lhs,"AlphaBlendEnable")){if(state_value(rhs,&v,0))st_rs(&p->st,27,v);return 1;}
+    if(!strcasecmp(lhs,"ZWriteEnable")){if(state_value(rhs,&v,0))st_rs(&p->st,14,v);return 1;}
+    if(!strcasecmp(lhs,"ZEnable")){if(state_value(rhs,&v,0))st_rs(&p->st,7,v);return 1;}
+    if(!strcasecmp(lhs,"CullMode")){if(state_value(rhs,&v,0))st_rs(&p->st,22,v);return 1;}
+    if(!strcasecmp(lhs,"AlphaTestEnable")){if(state_value(rhs,&v,0))st_rs(&p->st,15,v);return 1;}
     return 0;
 }
 static int assemble(FO2ShaProgram *p,const char *src,int pixel,char *err,size_t ec){
@@ -157,7 +216,7 @@ static int assemble(FO2ShaProgram *p,const char *src,int pixel,char *err,size_t 
 static char *block(char *s,char **end){char *b=strchr(s,'{');if(!b)return 0;int d=1;char *q=b+1;while(*q&&d){if(*q=='{')d++;else if(*q=='}')d--;q++;}if(d)return 0;*end=q;return dup_n(b+1,(size_t)(q-b-2));}
 static FO2ShaProgram *lookup(FO2ShaEffect *e,const char *n){for(unsigned i=0;i<e->np;i++)if(!strcasecmp(e->prog[i].name,n))return &e->prog[i];return 0;}
 static int shaders(FO2ShaEffect *e,char *s,const char *kind,int pix,char *err,size_t ec){for(char *p=s;(p=find_ci(p,kind));){char n[64]={0};if(sscanf(p,"%*s %63s",n)!=1){p+=strlen(kind);continue;}char *a=find_ci(p,"asm"),*z=0,*body=a?block(a,&z):0;if(!body){p+=strlen(kind);continue;}if(e->np==e->pcap){unsigned c=e->pcap?e->pcap*2:8;e->prog=realloc(e->prog,c*sizeof *e->prog);e->pcap=c;}FO2ShaProgram *g=&e->prog[e->np++];memset(g,0,sizeof *g);g->name=dup_n(n,strlen(n));if(!assemble(g,body,pix,err,ec)){free(body);return 0;}free(body);p=z;}return 1;}
-static int techniques(FO2ShaEffect *e,char *s,char *err,size_t ec){for(char *p=s;(p=find_ci(p,"technique"));){char n[64]={0};if(sscanf(p,"technique %63s",n)!=1){p+=9;continue;}char *te=0,*tb=block(p,&te);if(!tb)return 0;if(e->nt==e->tcap){unsigned c=e->tcap?e->tcap*2:4;e->tech=realloc(e->tech,c*sizeof *e->tech);e->tcap=c;}Tech *t=&e->tech[e->nt++];memset(t,0,sizeof *t);t->name=dup_n(n,strlen(n));for(char *q=tb;(q=find_ci(q,"pass"));){char pn[64]={0};if(sscanf(q,"pass %63s",pn)!=1){q+=4;continue;}char *pe=0,*pb=block(q,&pe);if(!pb)break;if(t->n==t->cap){unsigned c=t->cap?t->cap*2:4;t->p=realloc(t->p,c*sizeof *t->p);t->cap=c;}Pass *x=&t->p[t->n++];memset(x,0,sizeof *x);x->name=dup_n(pn,strlen(pn));for(char *ln=pb;ln;){char *nx=strchr(ln,'\n');if(nx)*nx++=0;char *eq=strchr(ln,'=');if(eq){*eq++=0;trim(ln);trim(eq);pass_state(x,ln,eq);if(!strncasecmp(ln,"Texture[",8)){int st=atoi(ln+8);char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b&&st>=0&&st<16)x->tex[st]=dup_n(a+1,(size_t)(b-a-1));}else if(!strcasecmp(ln,"VertexShader")||!strcasecmp(ln,"PixelShader")){char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b){char **dst=!strcasecmp(ln,"VertexShader")?&x->vsn:&x->psn;*dst=dup_n(a+1,(size_t)(b-a-1));}}else if(!strncasecmp(ln,"VertexShaderConstantF[",21)||!strncasecmp(ln,"PixelShaderConstantF[",20)){int pix=!strncasecmp(ln,"Pixel",5),r=atoi(strchr(ln,'[')+1);float v[4]={0};sscanf(eq,"float4(%f%*[, ]%f%*[, ]%f%*[, ]%f",&v[0],&v[1],&v[2],&v[3]);if(pix&&r<32){x->pm[r]=1;memcpy(x->pc[r],v,16);}if(!pix&&r<256){x->vm[r]=1;memcpy(x->vc[r],v,16);}}}ln=nx;}free(pb);q=pe;}free(tb);p=te;}for(unsigned i=0;i<e->nt;i++)for(unsigned j=0;j<e->tech[i].n;j++){Pass *x=&e->tech[i].p[j];if(x->vsn&&strcasecmp(x->vsn,"null"))x->vs=lookup(e,x->vsn);if(x->psn&&strcasecmp(x->psn,"null"))x->ps=lookup(e,x->psn);if((x->vsn&&strcasecmp(x->vsn,"null")&&!x->vs)||(x->psn&&strcasecmp(x->psn,"null")&&!x->ps)){errorf(err,ec,"unresolved shader reference");return 0;}}return 1;}
+static int techniques(FO2ShaEffect *e,char *s,char *err,size_t ec){for(char *p=s;(p=find_ci(p,"technique"));){char n[64]={0};if(sscanf(p,"technique %63s",n)!=1){p+=9;continue;}char *te=0,*tb=block(p,&te);if(!tb)return 0;if(e->nt==e->tcap){unsigned c=e->tcap?e->tcap*2:4;e->tech=realloc(e->tech,c*sizeof *e->tech);e->tcap=c;}Tech *t=&e->tech[e->nt++];memset(t,0,sizeof *t);t->name=dup_n(n,strlen(n));for(char *q=tb;(q=find_ci(q,"pass"));){char pn[64]={0};if(sscanf(q,"pass %63s",pn)!=1){q+=4;continue;}char *pe=0,*pb=block(q,&pe);if(!pb)break;if(t->n==t->cap){unsigned c=t->cap?t->cap*2:4;t->p=realloc(t->p,c*sizeof *t->p);t->cap=c;}Pass *x=&t->p[t->n++];memset(x,0,sizeof *x);x->name=dup_n(pn,strlen(pn));for(char *ln=pb;ln;){char *nx=strchr(ln,'\n');if(nx)*nx++=0;char *eq=strchr(ln,'=');if(eq){*eq++=0;trim(ln);trim(eq);pass_state(x,ln,eq);if(!strncasecmp(ln,"Texture[",8)){int st=atoi(ln+8);char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b&&st>=0&&st<16)x->tex[st]=dup_n(a+1,(size_t)(b-a-1));}else if(!strcasecmp(ln,"VertexShader")||!strcasecmp(ln,"PixelShader")){char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b){char **dst=!strcasecmp(ln,"VertexShader")?&x->vsn:&x->psn;*dst=dup_n(a+1,(size_t)(b-a-1));}}else if(!strncasecmp(ln,"VertexShaderConstantF[",21)||!strncasecmp(ln,"PixelShaderConstantF[",20)){int pix=!strncasecmp(ln,"Pixel",5),r=-1;char *ie=strchr(ln,'[');if(ie){char *re=0;long n=strtol(ie+1,&re,10);if(re!=ie+1){while(isspace((unsigned char)*re))re++;if(*re==']'&&n>=0&&n<0x10000)r=(int)n;}}float v[4];if(parse_float4(eq,v)){if(pix&&r>=0&&r<32){x->pm[r]=1;memcpy(x->pc[r],v,16);}else if(!pix&&r>=0&&r<256){x->vm[r]=1;memcpy(x->vc[r],v,16);}}}}ln=nx;}free(pb);q=pe;}free(tb);p=te;}for(unsigned i=0;i<e->nt;i++)for(unsigned j=0;j<e->tech[i].n;j++){Pass *x=&e->tech[i].p[j];if(x->vsn&&strcasecmp(x->vsn,"null"))x->vs=lookup(e,x->vsn);if(x->psn&&strcasecmp(x->psn,"null"))x->ps=lookup(e,x->psn);if((x->vsn&&strcasecmp(x->vsn,"null")&&!x->vs)||(x->psn&&strcasecmp(x->psn,"null")&&!x->ps)){errorf(err,ec,"unresolved shader reference");return 0;}}return 1;}
 FO2ShaEffect *fo2_sha_parse(const char *src,size_t len,char *err,size_t ec){char *s=dup_n(src,len);FO2ShaEffect *e=calloc(1,sizeof *e);if(!s||!e)return 0;char *f=find_ci(s,"inputStreamFormat"),*a=f?strchr(f,'"'):0,*b=a?strchr(a+1,'"'):0;if(a&&b)e->fmt=dup_n(a+1,(size_t)(b-a-1));if(!shaders(e,s,"vertexshader",0,err,ec)||!shaders(e,s,"pixelshader",1,err,ec)||!techniques(e,s,err,ec)){fo2_sha_free(e);free(s);return 0;}free(s);return e;}
 void fo2_sha_free(FO2ShaEffect *e){if(!e)return;free(e->fmt);for(unsigned i=0;i<e->np;i++){free(e->prog[i].name);free(e->prog[i].tok);}free(e->prog);for(unsigned i=0;i<e->nt;i++){free(e->tech[i].name);for(unsigned j=0;j<e->tech[i].n;j++){Pass *p=&e->tech[i].p[j];free(p->name);free(p->vsn);free(p->psn);for(int k=0;k<16;k++)free(p->tex[k]);}free(e->tech[i].p);}free(e->tech);free(e);}
 unsigned fo2_sha_technique_count(const FO2ShaEffect *e){return e?e->nt:0;}unsigned fo2_sha_pass_count(const FO2ShaEffect *e,unsigned t){return e&&t<e->nt?e->tech[t].n:0;}static const Pass *gp(const FO2ShaEffect *e,unsigned t,unsigned p){return e&&t<e->nt&&p<e->tech[t].n?&e->tech[t].p[p]:0;}
