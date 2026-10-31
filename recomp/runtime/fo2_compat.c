@@ -1,8 +1,10 @@
 /* FlatOut browser build: symbols that are optional NFSU2 instrumentation used
  * by the shared Win32/COM runtime. FlatOut does not install those hooks. */
 #include <stdint.h>
+#include <stdio.h>
 #include "cpu.h"
 #include "decls.h"
+#include "fo2_default_binds.h"
 
 uint32_t g_fe_mgr = 0;
 void overrides_report(void) {}
@@ -49,6 +51,8 @@ static void fo2_memcpy(CPU *c){
     POP32(c->eip);
 }
 
+static void fo2_bind_warn(const char *msg){ fprintf(stderr, "%s\n", msg); }
+
 void fo2_compat_install(void){
     extern void dispatch_patch(uint32_t, void (*)(CPU *));
     /* 0x5610a5..0x5610b3 are a computed jump table into a row of MOVSDs.
@@ -62,4 +66,9 @@ void fo2_compat_install(void){
     };
     for (unsigned i = 0; i < 15; i++) dispatch_patch(0x005610a5u + i, tail[i]);
     dispatch_patch(0x00560ef0u, fo2_memcpy);
+
+    /* Called by the web main after mem_load_pe/win32_init: the defaults table
+     * is read only now, and only the table changes -- a saved mapping is
+     * loaded separately by sub_00553220 and is never touched here. */
+    fo2_default_binds_apply(fo2_bind_warn);
 }

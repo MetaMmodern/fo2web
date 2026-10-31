@@ -22,7 +22,7 @@ LDOPT="${LDOPT} -mmacosx-version-min=$MINOS"
 WHICH="${1:-both}"
 case "$WHICH" in both|orig|hd) ;; *) echo "usage: ./link.sh [orig|hd]"; exit 1 ;; esac
 
-CSRC="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha debug res fileio overrides d3dx_hle vsemu enhance perflog autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro oracle drifttest discord roam roam_core roam_bsd roam_game mprace horn hornmenu powerunits drift carsfx racehorn racenet winsock online netrace net_vlan module modheap headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
+CSRC="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope debug res fileio overrides d3dx_hle vsemu enhance perflog autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro oracle drifttest discord roam roam_core roam_bsd roam_game mprace horn hornmenu powerunits drift carsfx racehorn racenet winsock online netrace net_vlan module modheap headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
 MSRC="metal audio bundle gamepad keyboard_mac fpscounter texrep"
 # Unicorn 2.1.4 (native arm64, x86 target only) for the two test builds,
 # ORACLE=1 and ASIPEER=1: by default the project's work/deps/unicorn-2.1.4
@@ -88,6 +88,9 @@ if [ "$WHICH" != hd ]; then
   clang ${LDOPT} -o out/nfsu2_all  $SHARDS $RT out/obj/main.o $FW
   # free-roam multiplayer core: unit tests (./run.sh test runs them)
   clang -O1 -ffp-contract=off -mmacosx-version-min=$MINOS -Iruntime -o out/roam_unit tests/roam_unit.c runtime/roam_core.c runtime/roam_bsd.c
+  # effect Begin/End sampler scope: synthetic lifecycle tests (no game assets)
+  clang -O1 -g -fsanitize=address,undefined -mmacosx-version-min=$MINOS -Iruntime \
+        -o out/effect_smp_scope_unit tests/effect_smp_scope_unit.c runtime/effect_smp_scope.c runtime/flatout_sha.c
   clang -O2 -ffp-contract=off -mmacosx-version-min=$MINOS -Iruntime -o out/roam_fakepeer tests/roam_fakepeer.c runtime/roam_core.c runtime/roam_bsd.c
   clang -O2 -ffp-contract=off -mmacosx-version-min=$MINOS -Iruntime -o out/roam_recv tests/roam_recv.c runtime/roam_core.c runtime/roam_bsd.c
   # ASIPEER=1: also out/nfsu2_asipeer, a "virtual Windows friend" (the Windows

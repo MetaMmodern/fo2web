@@ -97,7 +97,7 @@ HDRSUM="$( (cat runtime/cpu.h runtime/web/compat/wasm_plat.h; echo "$CFLAGS $SHA
 # FlatOut's lifted image already owns several addresses that the NFSU2 patch
 # modules override. Exclude those NFS-only patch objects or wasm-ld sees the
 # same guest function twice (and silently prevents a FlatOut link).
-RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha fo2_compat debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
+RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope fo2_compat flatout_alt_key debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
 WEB="$(cd runtime/web && ls *.c | sed 's/\.c$//')"
 # Runtime membership is build-configuration-dependent. Remove stale objects
 # from a previous NFS build before linking, otherwise an omitted patch module
@@ -120,7 +120,12 @@ for p in $pids; do wait "$p" || { echo "runtime compile failed"; exit 1; }; done
 OBJS="$(ls "$OUT"/obj/*.o) $(ls "$OUT"/obj/srv/*.o) $(ls "$OUT"/rt/*.o)"
 PAGES=$(( INITIAL_MB * 16 ))
 rm -f "$OUT/nfsu2.wasm"
+# FlatOut's keyboard picker (sub_0055aca0) knows A-Z, 0-9 and 29 special VKs
+# but not Alt; its callers are generated code, out of dispatch_patch's reach.
+# runtime/flatout_alt_key.c wraps it (see that file) and reports VK_MENU only
+# when the original found no key.
 $CC $TARGET $OPT $FEAT -o "$OUT/nfsu2.wasm" $OBJS \
+  -Wl,--wrap=sub_0055aca0 \
   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296 \
   -Wl,--initial-memory=$(( INITIAL_MB * 1048576 )),--global-base=$GUEST_END \
   -Wl,-z,stack-size=$(( 8 * 1048576 )) -Wl,--no-stack-first \

@@ -99,7 +99,8 @@ case "$MODE" in
             SAMPLE=1 ALARM="${ALARM:-30}" exec "$BIN" "$EXE" ;;
   trace)    echo "D3D9 call trace"
             COMTRACE=1 ALARM="${ALARM:-20}" exec "$BIN" "$EXE" ;;
-  test)     "$ROOT/out/isatest" && "$ROOT/out/nfsu2_all" "$EXE" && "$ROOT/out/roam_unit" || exit 1
+  test)     "$ROOT/out/isatest" && "$ROOT/out/nfsu2_all" "$EXE" && "$ROOT/out/roam_unit" \
+              && "$ROOT/out/effect_smp_scope_unit" || exit 1
             # Winsock HLE: loopback (in the loopback-only sandbox) and the virtual LAN hub
             if [ -x "$ROOT/out/net_harness" ]; then
               SB=""; [ -x /usr/bin/sandbox-exec ] && SB="/usr/bin/sandbox-exec -f $ROOT/tests/net/loopback-only.sb"

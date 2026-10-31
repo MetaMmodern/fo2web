@@ -11,6 +11,7 @@ void guest_fair_yield(void);
 #include "cpu.h"
 #include "d3d9_tables.h"
 #include "flatout_sha.h"
+#include "effect_smp_scope.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -448,6 +449,12 @@ uint32_t g_tss_raw[8][40] = {
     [6] = { [11] = 6u }, [7] = { [11] = 7u },
 };
 uint32_t g_smp_raw[16][20];
+/* ID3DXEffect::Begin/End sampler scopes, keyed by effect object.  A pass
+ * applies its own sampler states into g_smp_raw (BeginPass); End restores the
+ * slots those passes declared, so a Clamp/Point setting cannot leak into the
+ * next effect.  smp_push() reads this table on every draw, so restoring here
+ * needs no extra dirty flag. */
+static FO2SmpScopeSet g_smp_scope;
 
 /* Is this method recorded into a state block? */
 /* --- method IDENTITY ----------------------------------------------------
@@ -1093,6 +1100,7 @@ static void com_destroy(uint32_t o){
         break;
     case IF_STATEBLOCK: sb_destroy(o); break;
     case IF_EFFECT: {
+        fo2_smp_scope_forget(&g_smp_scope, o);
         FO2EffectCtx *x = fo2_effect_ctx(o);
         if (x){ fo2_sha_free(x->sha); for(unsigned i=0;i<x->nparam;i++) free(x->param[i].name); memset(x,0,sizeof *x); }
         break; }
@@ -2929,9 +2937,16 @@ int com_call(CPU *c, uint32_t magic){
             if(A(c,2)){ mem_commit(A(c,2),4); MR32(A(c,2))=self+24u; }
             break;
         case 62: r=1; break; /* IsParameterUsed */
-        case 63: /* Begin */
-            if(out){ mem_commit(out,4); FO2EffectCtx *x=fo2_effect_ctx(self); MR32(out)=x&&x->sha?fo2_sha_pass_count(x->sha,0):1; }
-            break;
+        case 63: { /* Begin: save the sampler slots every selected pass may set. */
+            FO2EffectCtx *x=fo2_effect_ctx(self);
+            if(out){ mem_commit(out,4); MR32(out)=x&&x->sha?fo2_sha_pass_count(x->sha,0):1; }
+            /* BeginPass below currently applies technique 0; snapshot the
+             * union of the sampler masks of all its passes, not just the pass
+             * that happens to be current at Begin. */
+            uint32_t mask[FO2_SMP_STAGES];
+            fo2_smp_effect_mask(x?x->sha:0,0,mask);
+            fo2_smp_scope_begin(&g_smp_scope,self,nargs>=3?A(c,2):0u,g_smp_raw,mask);
+            break; }
         case 64: { /* BeginPass: apply the parsed effect pass. */
             uint32_t vs=MR32(self+16u), ps=MR32(self+20u), tex=MR32(self+12u);
             FO2EffectCtx *x=fo2_effect_ctx(self); unsigned pass=A(c,1); const FO2ShaEffect *se=x?x->sha:0;
@@ -2981,6 +2996,9 @@ int com_call(CPU *c, uint32_t magic){
                 if (dip_indexed(4u, 0u, 0u, ntri, 2u)) g_draw++;
             }
 #endif
+            break;
+        case 67: /* End: restore exactly the sampler slots Begin saved. */
+            fo2_smp_scope_end(&g_smp_scope,self,g_smp_raw);
             break;
         case 68: /* GetDevice */
             if(out){ mem_commit(out,4); MR32(out)=MR32(self+4u); com_addref(MR32(out)); }
@@ -4359,6 +4377,7 @@ int com_call(CPU *c, uint32_t magic){
             if (!ENVC("NORSRESET")){
                 memset(g_rs, 0, sizeof g_rs); g_rs_init = 0; g_rs_dirty = 1;
                 memset(g_smp_raw, 0, sizeof g_smp_raw);
+                fo2_smp_scope_reset(&g_smp_scope);   /* saved values belong to the old device */
                 memset(g_tss_raw, 0, sizeof g_tss_raw);
                 for (int q7 = 0; q7 < 8; q7++) g_tss_raw[q7][11] = (uint32_t)q7;
                 if (metal_available()){ rs_apply(); g_rs_dirty = 0; }
