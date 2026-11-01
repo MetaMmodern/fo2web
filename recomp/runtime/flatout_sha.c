@@ -197,7 +197,7 @@ static int assemble(FO2ShaProgram *p,const char *src,int pixel,char *err,size_t 
         }
 
         unsigned sat=0,shift=0;char *u=strchr(ln,'_');
-        if(u){sat=strstr(u,"sat")!=0;shift=strstr(u,"x4")?2:strstr(u,"x2")?1:strstr(u,"d2")?15:0;*u=0;}
+        if(u){sat=strstr(u,"sat")!=0;shift=strstr(u,"x4")?2:strstr(u,"x2")?1:strstr(u,"d2")?15:strstr(u,"d4")?14:0;*u=0;}
         unsigned code=op(ln);
         if(!code){char m[128];snprintf(m,sizeof m,"unsupported shader opcode %s",ln);errorf(err,ec,m);free(b);return 0;}
         int n=(code==TEX||code==TEXCOORD||code==TEXKILL)?1:na;
@@ -215,8 +215,88 @@ static int assemble(FO2ShaProgram *p,const char *src,int pixel,char *err,size_t 
 }
 static char *block(char *s,char **end){char *b=strchr(s,'{');if(!b)return 0;int d=1;char *q=b+1;while(*q&&d){if(*q=='{')d++;else if(*q=='}')d--;q++;}if(d)return 0;*end=q;return dup_n(b+1,(size_t)(q-b-2));}
 static FO2ShaProgram *lookup(FO2ShaEffect *e,const char *n){for(unsigned i=0;i<e->np;i++)if(!strcasecmp(e->prog[i].name,n))return &e->prog[i];return 0;}
+/* post_box4.fx is the only shipped .sha written in HLSL: its pass names a
+ * compiled ps_1_1 function instead of an asm block, so the generic asm
+ * collector above never sees a pixel program for it.  Recognise exactly the
+ * four-sample average body and feed the D3D compiler's ps_1_1 output through
+ * assemble(), so the bloom chain gets a real program instead of NULL.  Any
+ * other compile form fails the parse with a message: a pass is never left
+ * silently without the pixel program it declares. */
+static char *ps_body(char *src,const char *fn){
+    for(char *p=src;(p=find_ci(p,fn));p+=strlen(fn)){
+        char *q=p+strlen(fn);while(isspace((unsigned char)*q))q++;
+        if(*q!='(')continue;
+        int d=0;char *r=q;
+        for(;*r;r++){if(*r=='(')d++;else if(*r==')'&&!--d)break;}
+        if(!*r)continue;
+        for(r++;*r&&*r!='{'&&*r!=';';r++);
+        if(*r!='{')continue;
+        char *z=0,*b=block(r,&z);
+        if(b)return b;
+    }
+    return 0;
+}
+static int ps_body_ok(char *b){
+    unsigned nt=0,plus=0,mul=0;
+    for(char *q=b;*q;q++){
+        if(!strncasecmp(q,"tex2d",5))nt++;
+        else if(*q=='+')plus++;
+        else if(*q=='*'){char *e=0;mul++;if(strtof(q+1,&e)!=0.25f||e==q+1)return 0;}
+    }
+    if(nt!=4||plus!=3||mul!=1)return 0;
+    for(int i=0;i<4;i++){char n[16];snprintf(n,sizeof n,"g_sampler%d",i);if(!find_ci(b,n))return 0;}
+    return 1;
+}
+static int ps_samplers(Pass *x,char *src){
+    for(char *p=src;(p=find_ci(p,"sampler2d"));){
+        char name[64]={0};int stage=-1;
+        if(sscanf(p,"%*s %63[A-Za-z0-9_]",name)==1)
+            for(int i=0;i<4;i++){char n[16];snprintf(n,sizeof n,"g_sampler%d",i);if(!strcasecmp(name,n)){stage=i;break;}}
+        if(stage<0){p+=9;continue;}
+        char *z=0,*b=block(p,&z);
+        if(!b){p+=9;continue;}
+        for(char *ln=b;ln;){
+            char *nx=strchr(ln,'\n');if(nx)*nx++=0;
+            char *eq=strchr(ln,'=');
+            if(eq){*eq++=0;trim(ln);trim(eq);
+                int slot=-1;uint32_t v;
+                if(!strcasecmp(ln,"Texture")){
+                    char *a=strchr(eq,'<'),*end=a?strchr(a+1,'>'):0;
+                    if(a&&end){char *tex=dup_n(a+1,(size_t)(end-a-1));if(!tex){free(b);return 0;}free(x->tex[stage]);x->tex[stage]=tex;}
+                }
+                else if(!strcasecmp(ln,"AddressU"))slot=1;
+                else if(!strcasecmp(ln,"AddressV"))slot=2;
+                else if(!strcasecmp(ln,"MagFilter"))slot=5;
+                else if(!strcasecmp(ln,"MinFilter"))slot=6;
+                else if(!strcasecmp(ln,"MipFilter"))slot=7;
+                if(slot>=0&&state_value(eq,&v,slot==7))st_smp(&x->st,stage,(unsigned)slot,v);
+            }
+            ln=nx;
+        }
+        free(b);p=z;
+    }
+    return 1;
+}
+static const char ps11[]="ps.1.1\ntex t0\ntex t1\ntex t2\ntex t3\nadd r0, t0, t1\nadd r0, r0, t2\nadd_d4 r0, r0, t3\n";
+static int hlsl_ps(FO2ShaEffect *e,Pass *x,char *rhs,char *src,char *err,size_t ec){
+    char tgt[16]={0},fn[64]={0};
+    if(sscanf(rhs,"compile %15s %63[A-Za-z0-9_]",tgt,fn)!=2){errorf(err,ec,"malformed HLSL pixel shader declaration");return 0;}
+    if(strcasecmp(tgt,"ps_1_1")){char m[96];snprintf(m,sizeof m,"unsupported HLSL pixel shader target %s",tgt);errorf(err,ec,m);return 0;}
+    char *b=ps_body(src,fn);
+    if(!b){char m[96];snprintf(m,sizeof m,"HLSL pixel shader function %s not found",fn);errorf(err,ec,m);return 0;}
+    int ok=ps_body_ok(b);free(b);
+    if(!ok){errorf(err,ec,"unsupported HLSL ps_1_1 body (expected four-sample average)");return 0;}
+    if(!lookup(e,fn)){
+        if(e->np==e->pcap){unsigned c=e->pcap?e->pcap*2:8;void *q=realloc(e->prog,c*sizeof *e->prog);if(!q){errorf(err,ec,"out of memory");return 0;}e->prog=q;e->pcap=c;}
+        FO2ShaProgram *g=&e->prog[e->np];memset(g,0,sizeof *g);g->name=dup_n(fn,strlen(fn));e->np++;
+        if(!g->name||!assemble(g,ps11,1,err,ec)){free(g->name);free(g->tok);e->np--;return 0;}
+    }
+    free(x->psn);x->psn=dup_n(fn,strlen(fn));
+    if(!ps_samplers(x,src)){errorf(err,ec,"out of memory");return 0;}
+    return 1;
+}
 static int shaders(FO2ShaEffect *e,char *s,const char *kind,int pix,char *err,size_t ec){for(char *p=s;(p=find_ci(p,kind));){char n[64]={0};if(sscanf(p,"%*s %63s",n)!=1){p+=strlen(kind);continue;}char *a=find_ci(p,"asm"),*z=0,*body=a?block(a,&z):0;if(!body){p+=strlen(kind);continue;}if(e->np==e->pcap){unsigned c=e->pcap?e->pcap*2:8;e->prog=realloc(e->prog,c*sizeof *e->prog);e->pcap=c;}FO2ShaProgram *g=&e->prog[e->np++];memset(g,0,sizeof *g);g->name=dup_n(n,strlen(n));if(!assemble(g,body,pix,err,ec)){free(body);return 0;}free(body);p=z;}return 1;}
-static int techniques(FO2ShaEffect *e,char *s,char *err,size_t ec){for(char *p=s;(p=find_ci(p,"technique"));){char n[64]={0};if(sscanf(p,"technique %63s",n)!=1){p+=9;continue;}char *te=0,*tb=block(p,&te);if(!tb)return 0;if(e->nt==e->tcap){unsigned c=e->tcap?e->tcap*2:4;e->tech=realloc(e->tech,c*sizeof *e->tech);e->tcap=c;}Tech *t=&e->tech[e->nt++];memset(t,0,sizeof *t);t->name=dup_n(n,strlen(n));for(char *q=tb;(q=find_ci(q,"pass"));){char pn[64]={0};if(sscanf(q,"pass %63s",pn)!=1){q+=4;continue;}char *pe=0,*pb=block(q,&pe);if(!pb)break;if(t->n==t->cap){unsigned c=t->cap?t->cap*2:4;t->p=realloc(t->p,c*sizeof *t->p);t->cap=c;}Pass *x=&t->p[t->n++];memset(x,0,sizeof *x);x->name=dup_n(pn,strlen(pn));for(char *ln=pb;ln;){char *nx=strchr(ln,'\n');if(nx)*nx++=0;char *eq=strchr(ln,'=');if(eq){*eq++=0;trim(ln);trim(eq);pass_state(x,ln,eq);if(!strncasecmp(ln,"Texture[",8)){int st=atoi(ln+8);char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b&&st>=0&&st<16)x->tex[st]=dup_n(a+1,(size_t)(b-a-1));}else if(!strcasecmp(ln,"VertexShader")||!strcasecmp(ln,"PixelShader")){char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b){char **dst=!strcasecmp(ln,"VertexShader")?&x->vsn:&x->psn;*dst=dup_n(a+1,(size_t)(b-a-1));}}else if(!strncasecmp(ln,"VertexShaderConstantF[",21)||!strncasecmp(ln,"PixelShaderConstantF[",20)){int pix=!strncasecmp(ln,"Pixel",5),r=-1;char *ie=strchr(ln,'[');if(ie){char *re=0;long n=strtol(ie+1,&re,10);if(re!=ie+1){while(isspace((unsigned char)*re))re++;if(*re==']'&&n>=0&&n<0x10000)r=(int)n;}}float v[4];if(parse_float4(eq,v)){if(pix&&r>=0&&r<32){x->pm[r]=1;memcpy(x->pc[r],v,16);}else if(!pix&&r>=0&&r<256){x->vm[r]=1;memcpy(x->vc[r],v,16);}}}}ln=nx;}free(pb);q=pe;}free(tb);p=te;}for(unsigned i=0;i<e->nt;i++)for(unsigned j=0;j<e->tech[i].n;j++){Pass *x=&e->tech[i].p[j];if(x->vsn&&strcasecmp(x->vsn,"null"))x->vs=lookup(e,x->vsn);if(x->psn&&strcasecmp(x->psn,"null"))x->ps=lookup(e,x->psn);if((x->vsn&&strcasecmp(x->vsn,"null")&&!x->vs)||(x->psn&&strcasecmp(x->psn,"null")&&!x->ps)){errorf(err,ec,"unresolved shader reference");return 0;}}return 1;}
+static int techniques(FO2ShaEffect *e,char *s,char *err,size_t ec){for(char *p=s;(p=find_ci(p,"technique"));){char n[64]={0};if(sscanf(p,"technique %63s",n)!=1){p+=9;continue;}char *te=0,*tb=block(p,&te);if(!tb)return 0;if(e->nt==e->tcap){unsigned c=e->tcap?e->tcap*2:4;e->tech=realloc(e->tech,c*sizeof *e->tech);e->tcap=c;}Tech *t=&e->tech[e->nt++];memset(t,0,sizeof *t);t->name=dup_n(n,strlen(n));for(char *q=tb;(q=find_ci(q,"pass"));){char pn[64]={0};if(sscanf(q,"pass %63s",pn)!=1){q+=4;continue;}char *pe=0,*pb=block(q,&pe);if(!pb)break;if(t->n==t->cap){unsigned c=t->cap?t->cap*2:4;t->p=realloc(t->p,c*sizeof *t->p);t->cap=c;}Pass *x=&t->p[t->n++];memset(x,0,sizeof *x);x->name=dup_n(pn,strlen(pn));for(char *ln=pb;ln;){char *nx=strchr(ln,'\n');if(nx)*nx++=0;char *eq=strchr(ln,'=');if(eq){*eq++=0;trim(ln);trim(eq);pass_state(x,ln,eq);if(!strncasecmp(ln,"Texture[",8)){int st=atoi(ln+8);char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b&&st>=0&&st<16)x->tex[st]=dup_n(a+1,(size_t)(b-a-1));}else if(!strcasecmp(ln,"PixelShader")&&!strncasecmp(eq,"compile",7)){if(!hlsl_ps(e,x,eq,s,err,ec)){free(pb);return 0;}}else if(!strcasecmp(ln,"VertexShader")||!strcasecmp(ln,"PixelShader")){char *a=strchr(eq,'<'),*b=a?strchr(a+1,'>'):0;if(a&&b){char **dst=!strcasecmp(ln,"VertexShader")?&x->vsn:&x->psn;*dst=dup_n(a+1,(size_t)(b-a-1));}}else if(!strncasecmp(ln,"VertexShaderConstantF[",21)||!strncasecmp(ln,"PixelShaderConstantF[",20)){int pix=!strncasecmp(ln,"Pixel",5),r=-1;char *ie=strchr(ln,'[');if(ie){char *re=0;long n=strtol(ie+1,&re,10);if(re!=ie+1){while(isspace((unsigned char)*re))re++;if(*re==']'&&n>=0&&n<0x10000)r=(int)n;}}float v[4];if(parse_float4(eq,v)){if(pix&&r>=0&&r<32){x->pm[r]=1;memcpy(x->pc[r],v,16);}else if(!pix&&r>=0&&r<256){x->vm[r]=1;memcpy(x->vc[r],v,16);}}}}ln=nx;}free(pb);q=pe;}free(tb);p=te;}for(unsigned i=0;i<e->nt;i++)for(unsigned j=0;j<e->tech[i].n;j++){Pass *x=&e->tech[i].p[j];if(x->vsn&&strcasecmp(x->vsn,"null"))x->vs=lookup(e,x->vsn);if(x->psn&&strcasecmp(x->psn,"null"))x->ps=lookup(e,x->psn);if((x->vsn&&strcasecmp(x->vsn,"null")&&!x->vs)||(x->psn&&strcasecmp(x->psn,"null")&&!x->ps)){errorf(err,ec,"unresolved shader reference");return 0;}}return 1;}
 FO2ShaEffect *fo2_sha_parse(const char *src,size_t len,char *err,size_t ec){char *s=dup_n(src,len);FO2ShaEffect *e=calloc(1,sizeof *e);if(!s||!e)return 0;char *f=find_ci(s,"inputStreamFormat"),*a=f?strchr(f,'"'):0,*b=a?strchr(a+1,'"'):0;if(a&&b)e->fmt=dup_n(a+1,(size_t)(b-a-1));if(!shaders(e,s,"vertexshader",0,err,ec)||!shaders(e,s,"pixelshader",1,err,ec)||!techniques(e,s,err,ec)){fo2_sha_free(e);free(s);return 0;}free(s);return e;}
 void fo2_sha_free(FO2ShaEffect *e){if(!e)return;free(e->fmt);for(unsigned i=0;i<e->np;i++){free(e->prog[i].name);free(e->prog[i].tok);}free(e->prog);for(unsigned i=0;i<e->nt;i++){free(e->tech[i].name);for(unsigned j=0;j<e->tech[i].n;j++){Pass *p=&e->tech[i].p[j];free(p->name);free(p->vsn);free(p->psn);for(int k=0;k<16;k++)free(p->tex[k]);}free(e->tech[i].p);}free(e->tech);free(e);}
 unsigned fo2_sha_technique_count(const FO2ShaEffect *e){return e?e->nt:0;}unsigned fo2_sha_pass_count(const FO2ShaEffect *e,unsigned t){return e&&t<e->nt?e->tech[t].n:0;}static const Pass *gp(const FO2ShaEffect *e,unsigned t,unsigned p){return e&&t<e->nt&&p<e->tech[t].n?&e->tech[t].p[p]:0;}

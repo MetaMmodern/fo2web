@@ -32,6 +32,15 @@ void guest_backtrace(CPU*,int);
 void dispatch_indirect(CPU*,uint32_t);
 static int g_verbose = -1;
 static int VB(void){ if(g_verbose<0) g_verbose = ENVC("VERBOSE")?1:0; return g_verbose; }
+/* [glow] FO2GLOW: one switch for the post-process bloom / fog investigation.
+ * Every category has its OWN bounded counter; when a category reaches its cap
+ * it goes silent.  With FO2GLOW unset the only cost is a static int read. */
+static int g_glow = -1;
+static int glow_on(void){ if(g_glow<0){ const char *e=ENVC("FO2GLOW");
+    g_glow = (e && *e && e[0]!='0'); } return g_glow; }
+static int glow_take(unsigned *n, unsigned cap){ return (*n)++ < cap; }
+static unsigned g_glow_rs_n, g_glow_up_n, g_glow_d256_n, g_glow_fx_n;
+static unsigned g_glow_dipskip_n, g_glow_es_n, g_glow_dip24_n, g_glow_setrt_n;
 /* Metal bridge (metal.m) - inert when absent */
 int  metal_available(void);
 void metal_set_clear_color(unsigned argb);
@@ -247,6 +256,8 @@ uint64_t g_com_calls=0, g_com_unimpl=0;
 static uint64_t g_mstat[MSTAT_IF][MSTAT_M];
 static uint64_t g_present=0, g_draw=0;
 static uint64_t g_fo2_pass_draw_mark=0;
+/* UV count while a parsed null-VS PosprojTex1/PosprojTex4 pass is active. */
+static uint32_t g_posproj_pass_uvs=0;
 static uint32_t g_d3d9=0, g_dev=0, g_cur_decl=0, g_cur_fvf=0, g_cur_tex=0;
 
 /* ---------------- vertex shader (interpreted on the CPU) ----------------
@@ -1069,7 +1080,7 @@ static void ds_share(uint32_t data, int d){
 }
 typedef struct { uint32_t handle, texture; char *name; } FO2EffectParam;
 #define FO2_SHA_PASS_CACHE 64u
-typedef struct { uint32_t object; FO2ShaEffect *sha; FO2EffectParam param[64]; unsigned nparam; uint32_t vs, ps; uint32_t pass_vs[FO2_SHA_PASS_CACHE], pass_ps[FO2_SHA_PASS_CACHE]; unsigned trace_sets, trace_passes; } FO2EffectCtx;
+typedef struct { uint32_t object; FO2ShaEffect *sha; FO2EffectParam param[64]; unsigned nparam; uint32_t vs, ps; uint32_t pass_vs[FO2_SHA_PASS_CACHE], pass_ps[FO2_SHA_PASS_CACHE]; unsigned trace_sets, trace_passes; unsigned glow_posproj; } FO2EffectCtx;
 static FO2EffectCtx g_fo2_effects[128];
 static FO2EffectCtx *fo2_effect_ctx(uint32_t obj){ for(unsigned i=0;i<128;i++) if(g_fo2_effects[i].object==obj) return &g_fo2_effects[i]; return 0; }
 static FO2EffectCtx *fo2_effect_new(uint32_t obj){ for(unsigned i=0;i<128;i++) if(!g_fo2_effects[i].object){g_fo2_effects[i].object=obj;return &g_fo2_effects[i];} return 0; }
@@ -1162,6 +1173,25 @@ static float    g_psc[32][4];                    /* ps constants c0..c31 */
 static uint32_t g_psc_max = 0;                   /* highest index seen + 1 */
 static uint32_t g_psc_drop = 0;                  /* writes above 32 (dropped) */
 static int      g_cur_ps_id = 0;                 /* active ps id */
+/* [glow] a draw that was recorded while the bound render target is 256x256
+ * (the shadow map, and the post chain if the game ever issues those draws). */
+static void glow_draw256(uint32_t nprim, uint32_t caller){
+    if (!glow_on() || !g_cur_rt) return;
+    unsigned w = 0, h = 0;
+    void metal_tex_size(unsigned, unsigned*, unsigned*);
+    metal_tex_size(g_cur_rt, &w, &h);
+    if (w == 256u && h == 256u && glow_take(&g_glow_d256_n, 400u))
+        fprintf(stderr,"[glow] draw256 rt=%u vs=%d ps=%d nprim=%u caller=%08x\n",
+                g_cur_rt, (int)g_cur_vs, g_cur_ps_id, nprim, caller);
+}
+/* [glow] lifecycle of the PosprojTex (post-chain) effects only. */
+static void glow_fx(const char *what, uint32_t self, uint32_t tech, uint32_t pass){
+    if (!glow_on()) return;
+    FO2EffectCtx *x = fo2_effect_ctx(self);
+    if (!x || !x->glow_posproj) return;
+    if (glow_take(&g_glow_fx_n, 200u))
+        fprintf(stderr,"[glow] fx=%08x %s tech=%u pass=%u\n", self, what, tech, pass);
+}
 static int      g_psn = 0;                       /* number of registered ps */
 static uint32_t shader_reg(unsigned type,unsigned n,unsigned mask,unsigned swizzle,int dst){
     uint32_t t=0x80000000u | ((type&7u)<<28) | ((type&0x18u)<<8) | (n&0x7ffu);
@@ -1210,6 +1240,9 @@ uint32_t com_d3dx_effect_create(CPU *c,uint32_t device,uint32_t source,uint32_t 
     if (source && source_len && source_len < 1024u*1024u && mem_is_committed(source+source_len-1u)){
         char er[160]={0}; FO2EffectCtx *cx=fo2_effect_new(obj); char *txt=(char*)malloc(source_len+1u);
         if(cx&&txt){memcpy(txt,g_mem+source,source_len);txt[source_len]=0;cx->sha=fo2_sha_parse(txt,source_len,er,sizeof er);free(txt);if(cx->sha){fo2_effect_compile(cx);fprintf(stderr,"[sha] effect=%08x techniques=%u passes=%u format=%s\n",obj,fo2_sha_technique_count(cx->sha),fo2_sha_pass_count(cx->sha,0),fo2_sha_input_format(cx->sha)?fo2_sha_input_format(cx->sha):"-");}}
+        /* [glow] the post chain is exactly the PosprojTex family. */
+        if(cx&&cx->sha){ const char *gf=fo2_sha_input_format(cx->sha);
+            if(gf&&!strncmp(gf,"PosprojTex",10)) cx->glow_posproj=1u; }
         if(er[0])fprintf(stderr,"[sha] effect=%08x parse failed: %s\n",obj,er);
     }
     {
@@ -1890,6 +1923,45 @@ static void texproj_push(void){
         sel[st] = (float)(ci + 16u*(unsigned)pm);
     }
     metal_set_texproj(sel);
+}
+
+/* Posproj streams contain pixel XYZRHW followed by one or four float2 UVs. */
+static void draw_posproj(uint32_t vp, uint32_t nv, uint32_t pt, uint32_t stride, unsigned uvs){
+    void metal_tex_size(unsigned, unsigned *, unsigned *);
+    void metal_set_stage_tex(unsigned,unsigned,unsigned);
+    void metal_set_ps(int, const float *);
+    unsigned width=g_bb_w, height=g_bb_h;
+    if (g_cur_rt) metal_tex_size(g_cur_rt, &width, &height);
+    /* Guest vertices use logical coordinates, even when the GPU draws to a
+     * full-size physical target. Smaller post targets keep their own size. */
+    if (g_req_w && g_req_h && width==g_bb_w && height==g_bb_h){
+        width=g_req_w; height=g_req_h;
+    }
+    if (!width || !height) return;
+    TVert tv[24] = {0};
+    if (nv > 24u) return;
+    for (unsigned i=0; i<nv; i++){
+        uint32_t p=vp+i*stride;
+        float x=MRF32(p), y=MRF32(p+4u), z=MRF32(p+8u), rhw=MRF32(p+12u);
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(rhw) || rhw==0.f) return;
+        float w=1.f/rhw;
+        tv[i].x=(2.f*x/(float)width-1.f)*w;
+        tv[i].y=(1.f-2.f*y/(float)height)*w;
+        tv[i].z=z*w; tv[i].w=w;
+        if (!isfinite(w) || !isfinite(tv[i].x) || !isfinite(tv[i].y) || !isfinite(tv[i].z)) return;
+        tv[i].r=tv[i].g=tv[i].b=tv[i].a=1.f;
+        for (unsigned t=0; t<4; t++){
+            unsigned src=uvs==1u ? 0u : t;
+            tv[i].t[t][0]=MRF32(p+16u+src*8u);
+            tv[i].t[t][1]=MRF32(p+20u+src*8u);
+            if (!isfinite(tv[i].t[t][0]) || !isfinite(tv[i].t[t][1])) return;
+            tv[i].t[t][3]=1.f;
+        }
+    }
+    metal_set_stage_tex(g_tex_stage[1],g_tex_stage[2],g_tex_stage[3]);
+    metal_set_ps(g_cur_ps_id,&g_psc[0][0]);
+    texproj_push(); smp_push();
+    metal_draw_tv(tv,nv,pt,g_cur_tex);
 }
 
 /* vertices of a DrawPrimitiveUP call with n primitives: D3DPT_POINTLIST 1,
@@ -2770,6 +2842,7 @@ static void fxtr_dev(CPU *c, int iface, int mid, int nargs, const char *nm){
     fprintf(stderr, "\n");
 }
 
+
 int com_call(CPU *c, uint32_t magic){
     uint32_t iface=(magic>>16)&0x1FFFu, m=magic&0xFFFFu;
     g_com_calls++;
@@ -2938,8 +3011,10 @@ int com_call(CPU *c, uint32_t magic){
             break;
         case 62: r=1; break; /* IsParameterUsed */
         case 63: { /* Begin: save the sampler slots every selected pass may set. */
+            g_posproj_pass_uvs=0;
             FO2EffectCtx *x=fo2_effect_ctx(self);
             if(out){ mem_commit(out,4); MR32(out)=x&&x->sha?fo2_sha_pass_count(x->sha,0):1; }
+            if (glow_on()) glow_fx("Begin",self,MR32(self+8u),0u);
             /* BeginPass below currently applies technique 0; snapshot the
              * union of the sampler masks of all its passes, not just the pass
              * that happens to be current at Begin. */
@@ -2951,6 +3026,13 @@ int com_call(CPU *c, uint32_t magic){
             uint32_t vs=MR32(self+16u), ps=MR32(self+20u), tex=MR32(self+12u);
             FO2EffectCtx *x=fo2_effect_ctx(self); unsigned pass=A(c,1); const FO2ShaEffect *se=x?x->sha:0;
             const FO2ShaProgram *svp=se?fo2_sha_pass_program(se,0,pass,0):0,*spp=se?fo2_sha_pass_program(se,0,pass,1):0; size_t sw=0;const uint32_t *st=fo2_sha_tokens(svp,&sw);
+            const char *fmt=se?fo2_sha_input_format(se):0;
+            g_posproj_pass_uvs=0;
+            if (fmt && pass < fo2_sha_pass_count(se,0) && fo2_sha_program_is_null(svp)){
+                if (!strcmp(fmt,"PosprojTex4")) g_posproj_pass_uvs=4;
+                else if (!strcmp(fmt,"PosprojTex1")) g_posproj_pass_uvs=1;
+            }
+            if (glow_on()) glow_fx("BeginPass",self,MR32(self+8u),pass);
             if(st&&sw){
                 if(x&&pass<FO2_SHA_PASS_CACHE){if(!x->pass_vs[pass])x->pass_vs[pass]=effect_shader_object(0,st,sw);vs=x->pass_vs[pass];}
                 else vs=effect_shader_object(0,st,sw);
@@ -2986,6 +3068,8 @@ int com_call(CPU *c, uint32_t magic){
                 self,vs,g_cur_vs,ps,g_cur_ps_id,tex,g_cur_tex);
             break; }
         case 66: /* EndPass */
+            g_posproj_pass_uvs=0;
+            if (glow_on()) glow_fx("EndPass",self,MR32(self+8u),0u);
 #ifdef FLATOUT2
             /* Some lifted startup paths set all draw state but omit the final
              * DrawIndexedPrimitive call. Re-submit the known UI quad only when
@@ -2998,6 +3082,8 @@ int com_call(CPU *c, uint32_t magic){
 #endif
             break;
         case 67: /* End: restore exactly the sampler slots Begin saved. */
+            g_posproj_pass_uvs=0;
+            if (glow_on()) glow_fx("End",self,MR32(self+8u),0u);
             fo2_smp_scope_end(&g_smp_scope,self,g_smp_raw);
             break;
         case 68: /* GetDevice */
@@ -3159,6 +3245,10 @@ int com_call(CPU *c, uint32_t magic){
                 if (g_rs[st] != val){ g_rs[st] = val; g_rs_dirty = 1;
                     int seen=0; for(int k=0;k<g_rs_nval[st];k++) if(g_rs_vals[st][k]==val) seen=1;
                     if(!seen && g_rs_nval[st]<4) g_rs_vals[st][g_rs_nval[st]++]=val;
+                    /* [glow] FOGENABLE=28 / FOGCOLOR=34, one line per change. */
+                    if ((st==28u || st==34u) && glow_on() && glow_take(&g_glow_rs_n, 64u))
+                        fprintf(stderr,"[glow] rs FOGENABLE=%u FOGCOLOR=%06x\n",
+                                g_rs[28], g_rs[34]);
                 }
                 g_rs_hits[st]++;
             }
@@ -3224,6 +3314,13 @@ int com_call(CPU *c, uint32_t magic){
                 /* (this, Type, BaseVertexIndex, MinIndex, NumVertices,
                  *  StartIndex, PrimitiveCount) */
                 uint32_t pt=A(c,1), basev=A(c,2), starti=A(c,5), nprim=A(c,6);
+                /* [glow] the deferred post-quad flush is SetStreamSource(stride
+                 * 24) plus a SMALL DrawIndexedPrimitive: trace that signature
+                 * wherever it lands, not only while a 256x256 target is bound. */
+                if (glow_on() && nprim <= 64u && g_ss_stride == 24u &&
+                    glow_take(&g_glow_dip24_n, 400u))
+                    fprintf(stderr,"[glow] dip24 rt=%u nprim=%u nv=%u vs=%d ps=%d caller=%08x\n",
+                            g_cur_rt, nprim, A(c,4), (int)g_cur_vs, g_cur_ps_id, c->eip);
                 /* Source-side companion to [wheel-input]/[wheel-output].
                  * This is deliberately before either the persistent-index
                  * fast path or the expansion fallback: it reports exactly
@@ -3397,9 +3494,15 @@ int com_call(CPU *c, uint32_t magic){
                     uint32_t ifmt  = MR32(g_ib_obj+12);
                     uint32_t isz   = (ifmt==102u) ? 4u : 2u;   /* INDEX32 : INDEX16 */
                     uint32_t ntri  = (pt==4u||pt==5u||pt==6u) ? nprim : 0u;
-                    if (!ntri || !vbase || !ibase){ g_dip_skip++; }
+                    if (!ntri || !vbase || !ibase){ g_dip_skip++;
+                        /* [glow] rejected after the outer guard: no triangles
+                         * (non-tri primitive list) or a zero buffer base. */
+                        if (glow_on() && glow_take(&g_glow_dipskip_n, 64u))
+                            fprintf(stderr,"[glow] dip-skip why=2 pt=%u nprim=%u stride=%u vb=%08x ib=%08x rt=%u\n",
+                                    pt, nprim, g_ss_stride, vbase, ibase, g_cur_rt); }
                     else if (dip_indexed(pt, basev, starti, ntri, isz)){
-                        g_dip_draws++; g_dip_tris += ntri; }
+                        g_dip_draws++; g_dip_tris += ntri;
+                        if (glow_on()) glow_draw256(ntri, c->eip); }
                     else {
                         if (!g_idx_scratch) g_idx_scratch = gbuf_alloc(4096u*64u);
                         uint32_t maxv = 4095u / 3u * 3u;       /* draw_up limit */
@@ -3425,10 +3528,64 @@ int com_call(CPU *c, uint32_t magic){
                                     memcpy(g_mem+dst, g_mem+src, g_ss_stride);
                                 }
                             }
-                            if (!ok){ g_dip_skip++; break; }
+                            if (!ok){ g_dip_skip++;
+                                /* [glow] expansion fallback stopped on an
+                                 * uncommitted index / vertex. */
+                                if (glow_on() && glow_take(&g_glow_dipskip_n, 64u))
+                                    fprintf(stderr,"[glow] dip-skip why=3 pt=%u nprim=%u stride=%u vb=%08x ib=%08x rt=%u\n",
+                                            pt, nprim, g_ss_stride, vbase, ibase, g_cur_rt);
+                                break; }
                             draw_up(4u, nv, g_idx_scratch, g_ss_stride);
                             g_dip_draws++; g_dip_tris += chunk;
+                            if (glow_on()) glow_draw256(chunk, c->eip);
                             done += chunk;
+                        }
+                    }
+                }
+                else if (glow_on() && glow_take(&g_glow_dipskip_n, 64u)){
+                    /* [glow] the outer guard itself rejected the draw; why is
+                     * the bitmask of the failing sub-conditions. */
+                    unsigned w = 0;
+                    if (!metal_available()) w |= 1u;   /* no renderer      */
+                    if (!g_ss_vb)          w |= 2u;    /* no vertex buffer */
+                    if (!g_ib_obj)         w |= 4u;    /* no index buffer  */
+                    if (!g_ss_stride)      w |= 8u;    /* no stride        */
+                    if (!nprim)            w |= 16u;   /* no primitives    */
+                    if (nprim >= 200000u)  w |= 32u;   /* absurd count     */
+                    fprintf(stderr,"[glow] dip-skip why=%u pt=%u nprim=%u stride=%u vb=%08x ib=%08x rt=%u\n",
+                            w, pt, nprim, g_ss_stride, g_ss_vb, g_ib_obj, g_cur_rt);
+                }
+            }
+            else if (NMEQ(nm,"DrawPrimitive")){
+                /* (this, PrimitiveType, StartVertex, PrimitiveCount) */
+                uint32_t pt=A(c,1), start=A(c,2), nprim=A(c,3);
+                uint32_t vb=g_ss_vb, stride=g_ss_stride;
+                uint64_t nv=0;
+                if (nprim && pt >= 2u && pt <= 6u){
+                    if (pt == 2u) nv=(uint64_t)nprim*2u;
+                    else if (pt == 3u) nv=(uint64_t)nprim+1u;
+                    else if (pt == 4u) nv=(uint64_t)nprim*3u;
+                    else nv=(uint64_t)nprim+2u;
+                }
+                if (metal_available() && vb && vb <= UINT32_MAX-11u && stride &&
+                    nv >= 2u && nv <= 4095u &&
+                    mem_is_committed(vb+4u) && mem_is_committed(vb+11u)){
+                    uint32_t size=MR32(vb+4u), base=MR32(vb+8u);
+                    uint64_t off=(uint64_t)g_ss_off+(uint64_t)start*stride;
+                    uint64_t bytes=nv*stride;
+                    if (base && off <= size && bytes <= (uint64_t)size-off &&
+                        (uint64_t)base+off+bytes-1u <= UINT32_MAX){
+                        uint64_t addr=(uint64_t)base+off, last=addr+bytes-1u;
+                        int committed=1;
+                        /* Check every 16 KB guest page, not just the endpoints. */
+                        for (uint64_t page=addr >> 14; page <= (last >> 14); page++){
+                            if (!mem_is_committed((uint32_t)(page << 14))){ committed=0; break; }
+                        }
+                        if (committed){
+                            if (pt==5u && ((g_posproj_pass_uvs==4u && stride==48u && (nprim==2u || nprim==22u)) ||
+                                           (g_posproj_pass_uvs==1u && stride==24u && nprim==2u)))
+                                draw_posproj((uint32_t)addr,(uint32_t)nv,pt,stride,g_posproj_pass_uvs);
+                            else draw_up(pt, (uint32_t)nv, (uint32_t)addr, stride);
                         }
                     }
                 }
@@ -3445,9 +3602,22 @@ int com_call(CPU *c, uint32_t magic){
                     uint32_t nprim=A(c,2), vp=A(c,3);
                     uint32_t nv = prim_verts(pt, nprim);
                     /* points: never drawn by the game */
-                    if (vp && stride && pt >= 2u && pt <= 6u && nv >= 2u && nv < 4096u &&
-                        mem_is_committed(vp) && mem_is_committed(vp + nv*stride - 1))
+                    int up_ok = vp && stride && pt >= 2u && pt <= 6u && nv >= 2u && nv < 4096u &&
+                                mem_is_committed(vp) && mem_is_committed(vp + nv*stride - 1);
+                    if (up_ok){
                         draw_up(pt, nv, vp, stride);
+                        if (glow_on()) glow_draw256(nprim, c->eip);
+                    } else if (glow_on() && glow_take(&g_glow_up_n, 64u))
+                        fprintf(stderr,"[glow] up-drop pt=%u nv=%u stride=%u vp=%08x committed=%u\n",
+                                pt, nv, stride, vp,
+                                (mem_is_committed(vp) && mem_is_committed(vp + nv*stride - 1)) ? 1u : 0u);
+                } else if (glow_on()){
+                    /* same guard, re-tested only while logging */
+                    uint32_t nprim=A(c,2), vp=A(c,3), nv=prim_verts(pt, nprim);
+                    if (vp && stride && pt >= 2u && pt <= 6u && nv >= 2u && nv < 4096u &&
+                        mem_is_committed(vp) && mem_is_committed(vp + nv*stride - 1) &&
+                        glow_take(&g_glow_up_n, 64u))
+                        fprintf(stderr,"[glow] up-norenderer\n");
                 }
                 if (dd_on()){
                     static uint32_t last_decl = 0xFFFFFFFFu; static int nd = 0;
@@ -3495,6 +3665,7 @@ int com_call(CPU *c, uint32_t magic){
                     }
                 }
             }
+
             r=0; }
         else if (MID(SetVertexShader)){
             uint32_t h=A(c,1); g_raw_vs = h;
@@ -3863,6 +4034,11 @@ int com_call(CPU *c, uint32_t magic){
             r=0; }
         else if (MID(BeginScene)){ if (metal_available()) metal_begin_frame(); r=0; }
         else if (MID(EndScene)){
+            /* [glow] how many deferred post-quad queue records are still
+             * pending at frame end: nonzero means they never got flushed. */
+            if (glow_on() && glow_take(&g_glow_es_n, 64u))
+                fprintf(stderr,"[glow] EndScene pending=%u\n",
+                        mem_is_committed(0x8da44cu) ? MR32(0x8da44cu) : 0u);
             r=0;
         }
         else if (MID(Present)){ g_present_no++;
@@ -4279,6 +4455,9 @@ int com_call(CPU *c, uint32_t magic){
                             (unsigned long long)org[4],(unsigned long long)org[7]); } }
                 uint32_t face = (surf && mem_is_committed(surf+47)) ? MR32(surf+44) : 0u;
                 g_cur_rt = tid;
+                if (glow_on() && glow_take(&g_glow_setrt_n, 128u))
+                    fprintf(stderr,"[glow] setrt idx=%u tid=%u surf=%08x caller=%08x\n",
+                            idx, tid, surf, c->eip);
                 metal_set_render_target(tid | ((face & 7u) << 16));
                 if (tid) g_rt_set++; else g_rt_screen++;
             }
@@ -4331,6 +4510,7 @@ int com_call(CPU *c, uint32_t magic){
             r=0; }
         else if (MID(SetVertexDeclaration)){ g_cur_decl=A(c,1); g_raw_decl=g_cur_decl; r=0; }
         else if (MID(Reset)){
+            g_posproj_pass_uvs=0;
             /* (this, D3DPRESENT_PARAMETERS*)
              * The game resets the device when resolution/graphics detail changes.
              * This method had NEVER been implemented; changing a setting crashed. */
