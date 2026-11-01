@@ -611,8 +611,7 @@ int vs_to_wgsl(const VSProg *p, int id, const int decl[16][2], char *out, size_t
         case O_NRM:  w = snprintf(ex, WEX, "vec4f(select(normalize((%s).xyz), vec3f(0.0), length((%s).xyz) == 0.0), 1.0)", s0, s0); break;
         case O_SGN:  w = snprintf(ex, WEX, "sign(%s)", s0); break;
         case O_M4x4: case O_M4x3: case O_M3x3: case O_M3x4: case O_M3x2: {
-            /* m?x? dst, src0, src1: rows are consecutive registers from src1
-             * (as on the Mac: K.c rows ignore def and relative addressing) */
+            /* m?x? dst, src0, src1: rows are consecutive registers from src1. */
             int rows = (y->op==O_M4x4) ? 4 : (y->op==O_M4x3 ? 3 :
                        (y->op==O_M3x3 ? 3 : (y->op==O_M3x4 ? 4 : 2)));
             int vec3 = (y->op==O_M3x3 || y->op==O_M3x4 || y->op==O_M3x2);
@@ -624,8 +623,12 @@ int vs_to_wgsl(const VSProg *p, int id, const int decl[16][2], char *out, size_t
                 int ty2 = RT(tok2), nn2 = RN(tok2) + rr;
                 if (ty2 == R_CONST2) nn2 += 2048; else if (ty2 == R_CONST3) nn2 += 4096;
                 else if (ty2 == R_CONST4) nn2 += 6144;
-                char row[48];
-                if (ty2 == R_TEMP){ x.r |= 1u << (nn2 & 31); snprintf(row, sizeof row, "r%d", nn2 & 31); }
+                char row[128];
+                if (RELADDR(tok2)){
+                    unsigned rtok=(tok2 & ~0x7ffu) | ((RN(tok2)+rr)&0x7ffu);
+                    w_reg(&x, row, sizeof row, rtok, y->rel[1]);
+                }
+                else if (ty2 == R_TEMP){ x.r |= 1u << (nn2 & 31); snprintf(row, sizeof row, "r%d", nn2 & 31); }
                 else if (ty2 == R_INPUT){ x.v |= 1u << (nn2 & 15); snprintf(row, sizeof row, "v%d", nn2 & 15); }
                 else snprintf(row, sizeof row, "K.c[kb + %du]", (nn2 & 255) + 1);
                 wb_put(&eb, "%sdot((%s)%s, (%s)%s)", rr ? ", " : "", s0, sw2, row, sw2);

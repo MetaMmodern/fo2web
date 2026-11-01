@@ -16,12 +16,21 @@ static void trim(char *s){size_t n=strlen(s),i=0;while(n&&isspace((unsigned char
 static char *find_ci(char *s,const char *k){size_t n=strlen(k);for(;*s;s++){size_t i=0;while(i<n&&s[i]&&tolower((unsigned char)s[i])==tolower((unsigned char)k[i]))i++;if(i==n){for(size_t j=0;j<n;j++)s[j]=(char)tolower((unsigned char)s[j]);return s;}}return 0;}
 static void errorf(char *e,size_t n,const char *m){if(n){strncpy(e,m,n-1);e[n-1]=0;}}
 static int push(FO2ShaProgram *p,uint32_t x){if(p->n==p->cap){size_t c=p->cap?p->cap*2:128;void *q=realloc(p->tok,c*4);if(!q)return 0;p->tok=q;p->cap=c;}p->tok[p->n++]=x;return 1;}
-static int rtype(const char *s,int pixel){if(s[0]=='v')return RIN;if(s[0]=='r')return RTEMP;if(s[0]=='c')return RCONST;if(s[0]=='t')return pixel?RADDR:ROUT;if(s[0]=='s')return RSAMP;if(!strncasecmp(s,"oPos",4))return RRAST;if(!strncasecmp(s,"oD",2))return RATTR;if(!strncasecmp(s,"oT",2))return ROUT;return 0;}
+static int rtype(const char *s,int pixel){if(s[0]=='v')return RIN;if(s[0]=='r')return RTEMP;if(s[0]=='c')return RCONST;if(!pixel&&s[0]=='a')return RADDR;if(s[0]=='t')return pixel?RADDR:ROUT;if(s[0]=='s')return RSAMP;if(!strncasecmp(s,"oPos",4))return RRAST;if(!strncasecmp(s,"oD",2))return RATTR;if(!strncasecmp(s,"oT",2))return ROUT;return 0;}
 static uint32_t regtok(const char *in,int dst,int pixel){
     char s[64];strncpy(s,in,sizeof(s)-1);s[sizeof(s)-1]=0;
     int smod=0;
     if (!strncasecmp(s,"1-",2)){ smod=6; memmove(s,s+2,strlen(s+2)+1); }
     else if (s[0]=='-'){ smod=1; memmove(s,s+1,strlen(s+1)+1); }
+    /* vs_1_1 uses implicit a0.x for relative constants; the dot inside
+     * c[a0.x + N] is not a source swizzle. */
+    int relative=0, base=0, consumed=0;
+    if(!dst&&!pixel&&sscanf(s,"c[a0.x + %d]%n",&base,&consumed)==1 &&
+       consumed>0 && base>=0 && base<2048 && (!s[consumed] || s[consumed]=='.')){
+        relative=1;
+        char tail[64]; snprintf(tail,sizeof tail,"c%d%s",base,s+consumed);
+        memcpy(s,tail,strlen(tail)+1);
+    }
     char *d=strchr(s,'.'),*w=d?d+1:0;if(d)*d=0;
     char *m=strchr(s,'_');
     if (m){
@@ -34,6 +43,7 @@ static uint32_t regtok(const char *in,int dst,int pixel){
     int ty=rtype(s,pixel),num=0;
     for(char *q=s;*q;q++)if(isdigit((unsigned char)*q)){num=atoi(q);break;}
     uint32_t t=0x80000000u|((ty&7u)<<28)|((ty&0x18u)<<8)|(unsigned)num;
+    if(relative)t|=0x00002000u;
     if(dst)t|=15u<<16;else t|=0xe4u<<16;
     if(w&&*w){
         size_t n=strlen(w);

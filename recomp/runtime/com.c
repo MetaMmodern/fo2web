@@ -2036,9 +2036,8 @@ static uint64_t g_dip_ix = 0, g_dip_ixfb[6];
  * pro_lightmapped*.sha put the register numbers in different places; they are
  * always resolved through vs_input_reg, never assumed.
  *
- * Requiring the declared inputs to be exactly the format's semantics (no
- * extra usage, every semantic present, no register reused) keeps an unknown
- * stream on the reported fallback instead of feeding it the wrong offsets.
+ * Require the declared inputs to match the format (no extra usage or reused
+ * registers). PosColorTex1 shaders may omit the unused texture coordinate.
  * Returns the number of elements, 0 when it does not match. */
 static int flatout_inferred_layout(const VSProg *prog, uint32_t stride, DElem *el){
     struct { int us, ui, off, type; } want[4];
@@ -2071,7 +2070,10 @@ static int flatout_inferred_layout(const VSProg *prog, uint32_t stride, DElem *e
             regs |= 1 << rg;
             used++;
         }
-    if (used != nw) return 0;            /* the shader wants more/less than this format */
+    if (stride == 24u && used == 2 &&
+        vs_input_reg(prog, 0, 0) >= 0 && vs_input_reg(prog, 10, 0) >= 0 &&
+        vs_input_reg(prog, 5, 0) < 0) nw = 2;
+    if (used != nw) return 0;
 
     for (int k = 0; k < nw; k++){
         int rg = vs_input_reg(prog, want[k].us, want[k].ui);
