@@ -2,7 +2,7 @@
 //! Node server's messages, in its order: the tools, the tests, the systemd unit and the container start this server
 //! with the command lines they started that one with).
 //!
-//!   nfsu2-server --data "<NFSU2 folder>" [--http-port 8080]
+//!   nfsu2-server --data "<game folder>" [--http-port 8080] [--http-bind 127.0.0.1|0.0.0.0]
 //!        [--tls-cert <pem> --tls-key <pem> [--port 8443] [--bind <address>] | --behind-proxy --host <name>[,<name>...]]
 //!        [--host <name>[,<name>...]] [--state <dir>]
 //!        [--trusted-proxies cloudflare,<ip>,<cidr>,...] [--real-ip-header x-forwarded-for|cf-connecting-ip]
@@ -16,12 +16,13 @@ use nfsu2_headers::ProxyTrust;
 
 use crate::paths;
 
-pub const VALUE_OPTS: [&str; 19] = [
+pub const VALUE_OPTS: [&str; 20] = [
     "--data",
     "--dist",
     "--wasm",
     "--port",
     "--http-port",
+    "--http-bind",
     "--bind",
     "--state",
     "--tls-cert",
@@ -59,6 +60,7 @@ pub struct Options {
     pub tests: String,
     pub https_port: u16,
     pub http_port: u16,
+    pub http_bind: String,
     pub tls_cert: String,
     pub tls_key: String,
     pub dev: bool,
@@ -270,6 +272,13 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
     let https_port = port("--port", "8443")?;
     let http_port = port("--http-port", "8080")?;
     let behind = flag("--behind-proxy");
+    let http_bind = string(arg("--http-bind", "127.0.0.1"));
+    if http_bind != "127.0.0.1" && http_bind != "0.0.0.0" {
+        return Err("--http-bind: use 127.0.0.1 or 0.0.0.0".into());
+    }
+    if http_bind == "0.0.0.0" && !behind {
+        return Err("--http-bind 0.0.0.0 requires --behind-proxy".into());
+    }
     let tls_cert = resolve_if("--tls-cert")?;
     let tls_key = resolve_if("--tls-key")?;
     let dev = flag("--dev");
@@ -352,7 +361,7 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
     let bind_arg = arg("--bind", "");
     let bind_set = bind_arg.as_deref() != Some("");
     if bind_set && tls != Tls::Cert {
-        return Err("--bind is for the HTTPS port (--tls-cert): the HTTP port listens on 127.0.0.1 only".into());
+        return Err("--bind is for the HTTPS port (--tls-cert); use --http-bind for HTTP".into());
     }
     let bind = if bind_set { string(bind_arg) } else { "::".to_string() };
     if http_port == 0 && tls == Tls::None {
@@ -403,6 +412,7 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
         tests,
         https_port,
         http_port,
+        http_bind,
         tls_cert,
         tls_key,
         dev,
@@ -514,7 +524,7 @@ mod tests {
             s.err(&["--no-such-option"], &[]),
             format!(
                 "unknown option --no-such-option\noptions: {}",
-                "--data --dist --wasm --port --http-port --bind --state --tls-cert --tls-key --trusted-proxies --real-ip-header --max-peers \
+                "--data --dist --wasm --port --http-port --http-bind --bind --state --tls-cert --tls-key --trusted-proxies --real-ip-header --max-peers \
              --artifacts --lan-impair --host --online --online-trace --roam-hub --vault-gb --behind-proxy --dev --access-log"
             )
         );
@@ -524,10 +534,10 @@ mod tests {
         assert_eq!(s.err(&[], &[("NFSU2_PORT", "")]), "--port: a port number (0 = none), not \"\"");
         assert_eq!(
             s.err(&["--data", &s.p("nowhere")], &[]),
-            format!("usage: nfsu2-server --data \"<folder with SPEED2.EXE>\"  (got: {})", s.p("nowhere"))
+            format!("usage: nfsu2-server --data \"<folder with FlatOut2.exe>\"  (got: {})", s.p("nowhere"))
         );
         let none = parse(&[], &|_| None, &s.p("repo"), &s.p(""), &RealFs).err().unwrap();
-        assert_eq!(none, "usage: nfsu2-server --data \"<folder with SPEED2.EXE>\"  (got: nothing)");
+        assert_eq!(none, "usage: nfsu2-server --data \"<folder with FlatOut2.exe>\"  (got: nothing)");
         assert_eq!(s.err(&["--tls-cert", "c.pem"], &[]), "--tls-cert and --tls-key go together");
         assert!(s.err(&["--behind-proxy", "--tls-cert", "c", "--tls-key", "k"], &[]).ends_with("not both"));
         assert!(s.err(&["--behind-proxy", "--http-port", "0"], &[]).contains("needs --http-port"));
@@ -548,7 +558,7 @@ mod tests {
         assert_eq!(s.err(&["--port", "0", "--tls-cert", "c", "--tls-key", "k"], &[]), "--tls-cert needs --port: the HTTPS port");
         assert_eq!(
             s.err(&["--bind", "0.0.0.0"], &[]),
-            "--bind is for the HTTPS port (--tls-cert): the HTTP port listens on 127.0.0.1 only"
+            "--bind is for the HTTPS port (--tls-cert); use --http-bind for HTTP"
         );
         assert_eq!(s.err(&["--http-port", "0"], &[]), "no port to listen on: --http-port is 0 and there is no --tls-cert");
         // NFSU2_DEV does not turn on the test aids: switches only from the command line
@@ -600,6 +610,9 @@ mod tests {
         assert_eq!(o.wasm, s.p("repo/out/web/nfsu2.wasm"));
         assert_eq!(o.game_json, s.p("repo/out/web/nfsu2.json"));
         assert_eq!((o.https_port, o.http_port, o.max_peers), (8443, 8080, 128));
+        assert_eq!(o.http_bind, "127.0.0.1");
+        assert_eq!(s.err(&["--http-bind", "0.0.0.0"], &[]), "--http-bind 0.0.0.0 requires --behind-proxy");
+        assert_eq!(s.parse(&["--behind-proxy", "--host", "game.example.com"], &[("NFSU2_HTTP_BIND", "0.0.0.0")]).unwrap().http_bind, "0.0.0.0");
         assert_eq!(o.tls, Tls::None);
         assert_eq!(o.bind, "::");
         assert!(!o.bind_set && !o.hsts_ok && o.online && o.roam_hub);

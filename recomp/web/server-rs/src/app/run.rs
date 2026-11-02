@@ -1,4 +1,4 @@
-//! The start: the state folder, the switch and its hosts, listening (HTTPS with a certificate, HTTP on 127.0.0.1),
+//! The start: the state folder, the switch and its hosts, listening (HTTPS with a certificate, HTTP on the configured address),
 //! the manifest and the module, the timers, the signals, and the start-up lines (the tests wait for "  access    :"
 //! and read others).
 
@@ -327,7 +327,7 @@ pub async fn run(o: Options, cores: usize) {
         }
     }
     if o.http_port != 0 {
-        let (listener, _) = bind("127.0.0.1", o.http_port, None).await.unwrap_or_else(|m| die(&format!("cannot listen: {m}")));
+        let (listener, _) = bind(&o.http_bind, o.http_port, None).await.unwrap_or_else(|m| die(&format!("cannot listen: {m}")));
         servers.push(serve(listener, None, limits.clone(), app.clone()));
     }
     if let Err(e) = app.refresh_manifest().await {
@@ -383,7 +383,7 @@ pub async fn run(o: Options, cores: usize) {
         ),
         format!(
             "  {here:<10}: {}{}",
-            if o.http_port != 0 { format!("http://localhost:{}/", o.http_port) } else { "(no local HTTP port)".into() },
+            if o.http_port != 0 { format!("http://{}:{}/", o.http_bind, o.http_port) } else { "(no local HTTP port)".into() },
             if o.tls == Tls::Proxy { "  (the proxy forwards here)" } else { "" }
         ),
     ];

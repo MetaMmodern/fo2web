@@ -10,10 +10,9 @@
 #   /module   nfsu2.wasm and nfsu2.json, built with web/build.sh from the image's revision, read-only
 #   /state    the server's keys (ETags, the switch's tokens), the Online mode's records and the bans: a volume, kept across
 #             updates (a new ETag key would make every browser download the game data again)
-# The server runs as uid 1000 (the user of the Node server's image before it, so a state volume that one wrote stays
-# writable) and listens on 127.0.0.1:8080 of the network it is given: the VPS's own, with Caddy in front
-# (web/deploy/compose.yml), or a tunnel's (compose.tunnel.yml).  Its command line is the server's options; by default
-# --behind-proxy, which needs NFSU2_HOST, the name players open.
+# The server runs as uid 1000 and listens on 0.0.0.0:8080 inside the container.
+# Put a trusted HTTPS proxy in front; do not publish the HTTP port publicly.
+# Its default --behind-proxy command needs NFSU2_HOST, the name players open.
 #
 # Both stages that build run on the build machine's platform: the binary is cross-compiled (cargo-zigbuild, static
 # musl) for the image's, so building it for arm64 on amd64 needs no emulation.
@@ -65,11 +64,12 @@ ENV NFSU2_REPO=/app \
     NFSU2_DATA=/game \
     NFSU2_WASM=/module/nfsu2.wasm \
     NFSU2_STATE=/state \
+    NFSU2_HTTP_BIND=0.0.0.0 \
     NFSU2_MAX_PEERS=6000
 # (a uid without a name: this stage runs nothing, so building it for arm64 needs no emulation)
 USER 1000:1000
 VOLUME /state
-# the module is there and the server answers (over the HTTP port, which stays on 127.0.0.1)
+# The module is there and the server answers on the container HTTP port.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --start-interval=2s \
   CMD wget -q -O /dev/null "http://127.0.0.1:${NFSU2_HTTP_PORT:-8080}/game.json" || exit 1
 ENTRYPOINT ["/app/nfsu2-server"]

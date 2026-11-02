@@ -67,6 +67,7 @@ fn security_headers_in_order() {
             "x-robots-tag",
         ]
     );
+    assert_eq!(h[0].1, "same-origin");
     assert_eq!(h[1].1, "require-corp");
     assert_eq!(h[8].1, "noindex, nofollow");
     let h = security_headers(true, false);
