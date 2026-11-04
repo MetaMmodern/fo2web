@@ -56,7 +56,7 @@ for both files after uploading. It uses an immutable release directory per
 commit and content hashes. A revision in a JSON file is a claim, not a
 cryptographic proof of how the WASM was built: use a trusted build and verified
 lift. The previously tested module with `+` and `lift: unknown` is not a clean,
-reproducible release artifact; make a clean build before release.
+reproducible release artifact; make a clean build for a normal release.
 
 Install Python 3, Git, SSH/SCP locally. The VPS needs Bash, Docker, `sha256sum`,
 and permission for the SSH user to create directories under
@@ -70,6 +70,23 @@ export COOLIFY_TOKEN='<scoped-api-token>'
 recomp/web/deploy/release.sh -n user@your-vps recomp/out/web
 recomp/web/deploy/release.sh user@your-vps recomp/out/web
 ```
+
+### Explicit unverified development release
+
+To use the existing working `flatout2-2fee04b+` module with the published
+server image without rebuilding, first run the local-only check, then, only when
+ready to deploy, run the second command with your configured environment and VPS:
+
+```sh
+recomp/web/deploy/release.sh -n --dev-release --image-commit 07cd9945381cb21b24cc22cba158243e0849f3da user@your-vps recomp/out/web
+recomp/web/deploy/release.sh --dev-release --image-commit 07cd9945381cb21b24cc22cba158243e0849f3da user@your-vps recomp/out/web
+```
+
+Both flags are required on every development invocation. This combination is
+**unverified**: the metadata revision is a claim, not proof of WASM provenance
+or compatibility with the image. The original JSON is unchanged. Each staged
+release includes a hash-verified `release.json` recording the WASM revision
+claim and hash, metadata hash, image commit and verification status.
 
 `-n` checks only local metadata and prints the image/release; it does not check
 GHCR, SSH or Coolify. The real command reads Coolify configuration, verifies
