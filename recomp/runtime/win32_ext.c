@@ -1774,7 +1774,12 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
             r=1; } }
     else if (!strcmp(n,"GetSystemTimeAsFileTime")){
         uint32_t p=A(c,0); if(p){ mem_commit(p,8);
-            static uint64_t ft = 130000000000000000ull; ft += 100000;
+            /* FlatOut seeds its playlist shuffle through CRT time(NULL).
+             * A fixed epoch plus a per-call increment repeats that seed on
+             * every launch. Wall time must stay separate from frame pacing. */
+            struct timespec ts;
+            if (clock_gettime(CLOCK_REALTIME, &ts)){ ts.tv_sec=time(0); ts.tv_nsec=0; }
+            uint64_t ft = ((uint64_t)ts.tv_sec + 11644473600ull) * 10000000ull + (uint64_t)ts.tv_nsec / 100u;
             MR32(p)=(uint32_t)ft; MR32(p+4)=(uint32_t)(ft>>32); } r=0; }
     else if (!strcmp(n,"GetLocalTime")||!strcmp(n,"GetSystemTime")){
         uint32_t p=A(c,0); if(p){ mem_commit(p,16); memset(g_mem+p,0,16);
