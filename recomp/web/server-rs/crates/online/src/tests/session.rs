@@ -170,15 +170,15 @@ impl Gen {
         ]);
         match kind {
             "mesg" => {
-                f.push(("TEXT", s(self.r.pick(&TEXTS))));
+                f.push(("TEXT", s(*self.r.pick(&TEXTS))));
                 if self.r.chance(0.3) {
                     let n = self.some_name();
                     f.push(("PRIV", s(&n)));
                 }
                 self.maybe(&mut f, "ATTR", &[s(""), s("G"), s("X"), s("GGGGGGGGGGGG")]);
             }
-            "move" => f.push(("NAME", s(self.r.pick(&["Lounge", "Circuit", "sprint", "URL", "nowhere", ""])))),
-            "auxi" => f.push(("TEXT", s(self.r.pick(&TEXTS)))),
+            "move" => f.push(("NAME", s(*self.r.pick(&["Lounge", "Circuit", "sprint", "URL", "nowhere", ""])))),
+            "auxi" => f.push(("TEXT", s(*self.r.pick(&TEXTS)))),
             "gsea" => {
                 self.maybe(&mut f, "START", &[json!(0), json!(1), json!(-1), s("x")]);
                 self.maybe(&mut f, "COUNT", &[json!(0), json!(2), json!(20), json!(99)]);
@@ -188,7 +188,7 @@ impl Gen {
                 self.maybe(&mut f, "SYSMASK", &[json!(0), json!(0xc0000)]);
             }
             "gcre" => {
-                f.push(("NAME", s(self.r.pick(&games))));
+                f.push(("NAME", s(*self.r.pick(&games))));
                 self.maybe(&mut f, "MAXSIZE", &[json!(0), json!(2), json!(4), json!(9), s("x")]);
                 self.maybe(&mut f, "MINSIZE", &[json!(0), json!(3), json!(7)]);
                 self.maybe(&mut f, "CUSTFLAGS", &[json!(0), json!(0x40000f3), json!(0x100), json!(4294967295u32)]);
@@ -197,7 +197,7 @@ impl Gen {
             }
             "gjoi" => {
                 if self.r.chance(0.7) {
-                    f.push(("NAME", s(self.r.pick(&games))));
+                    f.push(("NAME", s(*self.r.pick(&games))));
                 } else {
                     f.push(("IDENT", self.r.pick(&[json!(1), json!(2), json!(3), s("x"), s("1.0")]).clone()));
                 }
@@ -277,7 +277,7 @@ impl Gen {
                 self.maybe(&mut f, "ANSW", &[s("Y"), s("N"), s("no"), s("FALSE"), s("0"), s("yes"), s("")]);
             }
             "USCH" => {
-                f.push(("USER", s(self.r.pick(&["a", "b", "al", "zz", "", "CH", "d@x"]))));
+                f.push(("USER", s(*self.r.pick(&["a", "b", "al", "zz", "", "CH", "d@x"]))));
                 self.maybe(&mut f, "MAXR", &[json!(0), json!(1), json!(5), json!(30)]);
             }
             "PSET" => {
@@ -288,7 +288,7 @@ impl Gen {
             "SEND" | "GINV" | "GRSP" => {
                 let n = self.some_name();
                 f.push(("USER", s(&n)));
-                f.push(("BODY", s(self.r.pick(&TEXTS))));
+                f.push(("BODY", s(*self.r.pick(&TEXTS))));
                 self.maybe(&mut f, "SUBJ", &[s("hi"), s("")]);
                 self.maybe(&mut f, "TYPE", &[s("C"), s("GAMEINVITE")]);
                 self.maybe(&mut f, "LKEY", &[s("x")]);
@@ -426,14 +426,14 @@ impl Gen {
         };
         let kind = self.r.below(10);
         let f = match kind {
-            0 => unhex(self.r.pick(&["", "04", "040000000a4d0002", "04000000000000000000000000000000000000"])),
+            0 => unhex(*self.r.pick(&["", "04", "040000000a4d0002", "04000000000000000000000000000000000000"])),
             1 => lan_frame(4, vip, host, sport, port, *self.r.pick(&[0, 2, 6, 255]), cid, b"x"),
             2 => lan_frame(4, vip, host, sport, port, crate::vhost::SYNACK, cid, &[]),
             3 => lan_frame(4, vip, host, sport, port, crate::vhost::DATA, cid, &[]),
             4 => lan_frame(4, vip, host, sport, port, crate::vhost::FIN, cid, &[]),
             5 => lan_frame(*self.r.pick(&[0, 1, 2, 6, 9]), vip, host, sport, port, 1, cid, b"abc"),
             6 => {
-                let echo = unhex(self.r.pick(&["0800aabb00010002", "08", "0000aabb00010002", "0800000000000000ff"]));
+                let echo = unhex(*self.r.pick(&["0800aabb00010002", "08", "0000aabb00010002", "0800000000000000ff"]));
                 lan_frame(5, vip, host, 0, 0, 0, 0, &echo)
             }
             7 => lan_frame(3, vip, host, 3658, *self.r.pick(&[3658, 53]), *self.r.pick(&[0, 1]), 0, b"udp"),

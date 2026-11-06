@@ -122,6 +122,7 @@ pub async fn run(o: Options, cores: usize) {
                 Some(k) => log::limited("online", "Online lines", k, line, 30),
             }),
             tap: tap.clone(),
+            spy: o.spy_relay.clone(),
         })
     });
     // (its lines: the cap on the players' links going down while the server is busy and back up, at most one every 5 s)
@@ -444,6 +445,13 @@ pub async fn run(o: Options, cores: usize) {
             "off (--online off)".into()
         }
     ));
+    if !o.spy_relay.is_empty() {
+        lines.push(format!(
+            "  spy relay : the game's connections to the real OpenSpy servers: {}",
+            o.spy_relay.iter().map(|(p, h)| format!("{p} {h}")).collect::<Vec<_>>().join(", ")
+        ));
+        lines.push("  spy UDP   : NAT negotiation (27901, two hosts) and rate-limited public peer datagrams".into());
+    }
     lines.push(format!(
         "  saves     : {}",
         match &app.vault {

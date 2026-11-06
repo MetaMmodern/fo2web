@@ -139,7 +139,7 @@ fn frame_flood() {
     use crate::vhost::{DATA, lan_frame};
     use crate::{OnlineHost, OnlineOptions, VHOST_VIP};
 
-    let host = OnlineHost::spawn(OnlineOptions { state_dir: None, log: Arc::new(|_: &str, _: Option<&str>| {}), tap: None });
+    let host = OnlineHost::spawn(OnlineOptions { state_dir: None, log: Arc::new(|_: &str, _: Option<&str>| {}), tap: None, spy: Vec::new() });
     let out = Arc::new(AtomicUsize::new(0));
     let o2 = out.clone();
     host.attach_switch(Arc::new(move |_, _, _| {

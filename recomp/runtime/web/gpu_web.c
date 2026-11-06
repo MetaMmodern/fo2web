@@ -763,6 +763,13 @@ void metal_clear_target_ex(unsigned argb, unsigned flags, float z){
     if (!g_on) return;
     Buf *B = &g_b[g_cur];
     if (B->dn >= MAXD){ g_ov_d++; return; }
+    /* FO2_SPY_DBG: the first clears of a run, so a full-screen colour can be
+     * traced to the game's own clear or ruled out (a magenta clear is
+     * 0xFF00FF and would come from here). */
+    { static int dbg = -1;
+      if (dbg < 0){ const char *e = ENVC("FO2_SPY_DBG"); dbg = e && e[0] == '1' && !e[1]; }
+      if (dbg){ static unsigned n; if (n++ < 12)
+        fprintf(stderr, "[gpu] clear argb=%08x flags=%x z=%g\n", argb, flags, z); } }
     { static unsigned ov = 0xFFFFFFFFu;          /* CLEARCOL=0xAARRGGBB: diagnostics */
       if (ov == 0xFFFFFFFFu){ const char *e = ENVC("CLEARCOL"); ov = e ? (unsigned)strtoul(e, 0, 0) : 0u; }
       if (ov) argb = ov; }

@@ -130,6 +130,7 @@ int main(int argc, char **argv){
     MR32(TEB_BASE+0x20) = 100;              /* ProcessId  */
     MR32(TEB_BASE+0x24) = 1;                /* ThreadId   */
     MR32(TEB_BASE+0x2C) = TEB_BASE+0x1000;  /* TLS array  */
+    { extern void win32_static_tls_init(uint32_t); win32_static_tls_init(TEB_BASE); }
     MR32(TEB_BASE+0x30) = PEB_BASE;         /* PEB        */
     mem_commit(PEB_BASE, 0x1000);
     MR32(PEB_BASE+0x08) = 0x00400000u;      /* ImageBaseAddress */

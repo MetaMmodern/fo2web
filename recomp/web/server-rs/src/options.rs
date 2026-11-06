@@ -7,12 +7,14 @@
 //!        [--host <name>[,<name>...]] [--state <dir>]
 //!        [--trusted-proxies cloudflare,<ip>,<cidr>,...] [--real-ip-header x-forwarded-for|cf-connecting-ip]
 //!        [--max-peers 128] [--online on|off] [--roam-hub on|off] [--vault-gb 50] [--access-log]
+//!        [--spy-relay[=29900=gpcm.openspy.net:29900,...]]
 //!        [--dev [--artifacts <dir>] [--lan-impair <spec>] [--online-trace <file>]]
 //!
 //! Options with a value can also come from the environment as NFSU2_<OPTION> (NFSU2_DATA, NFSU2_PORT,
 //! NFSU2_TLS_CERT, ...); switches only from the command line.
 
 use nfsu2_headers::ProxyTrust;
+use nfsu2_online::{PORT_BUDDY, PORT_HTTP, PORT_LOBBY, PORT_REDIRECTOR};
 
 use crate::paths;
 
@@ -81,6 +83,9 @@ pub struct Options {
     /// a test aid: the lobby protocol's messages, decoded and with every secret redacted, into a file (nfsu2-online's
     /// LobbyTrace)
     pub online_trace: String,
+    /// the OpenSpy relay's table (nfsu2-online's spy.rs): the game's connections to these ports go to the real
+    /// servers on the internet; empty: the relay is off (--spy-relay)
+    pub spy_relay: Vec<(u16, String)>,
     pub tls: Tls,
     /// where the TLS port listens: "::" (IPv6 and IPv4, dual stack, so AAAA records work; IPv4 alone where the
     /// machine has no IPv6), unless --bind was given
@@ -209,6 +214,35 @@ pub fn within(a: &str, b: &str) -> bool {
     x == y || x.starts_with(&if y.ends_with('/') { y.clone() } else { format!("{y}/") })
 }
 
+/// The OpenSpy relay's table from `--spy-relay`'s value (`29900=gpcm.openspy.net:29900,...`), on top of the
+/// defaults (a port's entry stands in the default's place or adds a port); empty: the defaults.
+fn spy_table(spec: &str) -> Result<Vec<(u16, String)>, String> {
+    let mut t: Vec<(u16, String)> = nfsu2_online::SPY_DEFAULTS.iter().map(|(p, h)| (*p, h.to_string())).collect();
+    for e in spec.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let bad = || format!("--spy-relay: 29900=gpcm.openspy.net:29900 (port=host:port), not \"{e}\"");
+        let Some((p, hp)) = e.split_once('=') else { return Err(bad()) };
+        let Some((h, sp)) = hp.rsplit_once(':') else { return Err(bad()) };
+        // a port number, 1 to 65535 (0 is no port of the game's)
+        let port = |s: &str| {
+            let ok = !s.is_empty() && s.len() <= 5 && s.bytes().all(|c| c.is_ascii_digit());
+            s.parse::<u32>().ok().filter(|n| ok && (1..=65535).contains(n)).map(|n| n as u16)
+        };
+        match (port(p), h.is_empty(), port(sp)) {
+            (Some(p), false, Some(sp)) => match t.iter_mut().find(|(q, _)| *q == p) {
+                Some((_, up)) => *up = format!("{h}:{sp}"),
+                None => t.push((p, format!("{h}:{sp}"))),
+            },
+            _ => return Err(bad()),
+        }
+    }
+    // the online host's own services' ports are not the relay's (its listeners are made first)
+    if let Some((p, _)) = t.iter().find(|(p, _)| *p == PORT_REDIRECTOR || *p == PORT_LOBBY || *p == PORT_BUDDY || *p == PORT_HTTP) {
+        return Err(format!("--spy-relay: port {p} is the online host's own service's port: the relay cannot take it"));
+    }
+    t.sort_by_key(|(p, _)| *p);
+    Ok(t)
+}
+
 /// The options from the command line (without the program's name) and the environment; Err: the message the server
 /// dies with (main's `die`).  `repo`: the repository the defaults are in; `cwd`: what relative paths are resolved
 /// against.
@@ -221,8 +255,11 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
             if i >= argv.len() {
                 return Err(format!("{a} needs a value"));
             }
-        } else if !FLAG_OPTS.contains(&a) {
-            let all: Vec<&str> = VALUE_OPTS.iter().chain(FLAG_OPTS.iter()).copied().collect();
+        } else if a != "--spy-relay" && !a.starts_with("--spy-relay=") && !FLAG_OPTS.contains(&a) {
+            // (--spy-relay's value, when there is one, is attached with '=', or the flag is bare: the default
+            // table; nothing follows it to skip)
+            let all: Vec<&str> =
+                VALUE_OPTS.iter().copied().chain(std::iter::once("--spy-relay")).chain(FLAG_OPTS.iter().copied()).collect();
             return Err(format!("unknown option {a}\noptions: {}", all.join(" ")));
         }
         i += 1;
@@ -303,6 +340,16 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
         Some(v) => js_to_number(&v),
         None => f64::NAN,
     };
+    // --spy-relay[=29900=gpcm.openspy.net:29900,...]: the relay on, with the default table or the given one (a
+    // port's entry stands in the default's place or adds a port); with the environment, NFSU2_SPY_RELAY names a
+    // table of its own (an empty one, as compose passes it when unset, is off)
+    let spy_relay = match argv.iter().position(|a| a == "--spy-relay" || a.starts_with("--spy-relay=")) {
+        Some(i) => spy_table(argv[i].strip_prefix("--spy-relay=").unwrap_or(""))?,
+        None => match env(&env_name("--spy-relay")) {
+            Some(v) if !nfsu2_util::js::trim(&v).is_empty() => spy_table(&v)?,
+            _ => Vec::new(),
+        },
+    };
 
     if !truthy(&data_arg) || (!fs.exists(&paths::join(&data, "SPEED2.EXE")) && !fs.exists(&paths::join(&data, "FlatOut2.exe"))) {
         let got = if truthy(&data_arg) { data.as_str() } else { "nothing" };
@@ -335,6 +382,9 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
     }
     if online != "on" && online != "off" {
         return Err("--online: on or off".into());
+    }
+    if !spy_relay.is_empty() && online == "off" {
+        return Err("--spy-relay relays the online mode's connections: it needs --online on".into());
     }
     if roam_hub != "on" && roam_hub != "off" {
         return Err("--roam-hub: on or off".into());
@@ -425,6 +475,7 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
         roam_hub: roam_hub == "on",
         vault_gb,
         online_trace,
+        spy_relay,
         tls,
         bind,
         bind_set,
@@ -525,7 +576,7 @@ mod tests {
             format!(
                 "unknown option --no-such-option\noptions: {}",
                 "--data --dist --wasm --port --http-port --http-bind --bind --state --tls-cert --tls-key --trusted-proxies --real-ip-header --max-peers \
-             --artifacts --lan-impair --host --online --online-trace --roam-hub --vault-gb --behind-proxy --dev --access-log"
+             --artifacts --lan-impair --host --online --online-trace --roam-hub --vault-gb --spy-relay --behind-proxy --dev --access-log"
             )
         );
         assert_eq!(s.err(&["--http-port"], &[]), "--http-port needs a value");
@@ -599,6 +650,52 @@ mod tests {
         // the test scripts count only with --dev
         assert!(s.parse(&["--state", &s.p("repo/tests/state")], &[]).is_ok());
         assert!(s.err(&["--dev", "--state", &s.p("repo/tests/state")], &[]).contains("is inside the test scripts"));
+    }
+
+    // --spy-relay: bare is the default table, its entries stand in the defaults' place or add to them, the
+    // environment names a table too, and the online host's own ports are not the relay's
+    #[test]
+    fn the_spy_relay_table() {
+        let s = Setup::new();
+        assert_eq!(
+            s.parse(&["--spy-relay"], &[]).unwrap().spy_relay,
+            vec![
+                (28900, "available.openspy.net:28900".to_string()),
+                (28910, "flatout2pc.master.openspy.net:28910".to_string()),
+                (29900, "gpcm.openspy.net:29900".to_string()),
+                (29901, "gpsp.openspy.net:29901".to_string()),
+            ]
+        );
+        let o = s
+            .parse(&["--spy-relay=29900=gp.example.net:29900, 43300=gp.example.net:43300 ,"], &[])
+            .unwrap()
+            .spy_relay;
+        assert_eq!(
+            o,
+            vec![
+                (28900, "available.openspy.net:28900".to_string()),
+                (28910, "flatout2pc.master.openspy.net:28910".to_string()),
+                (29900, "gp.example.net:29900".to_string()),
+                (29901, "gpsp.openspy.net:29901".to_string()),
+                (43300, "gp.example.net:43300".to_string()),
+            ]
+        );
+        // the environment names a table of its own (an empty one, as compose passes it when unset, is off)
+        let o = s.parse(&[], &[("NFSU2_SPY_RELAY", "43300=gp.example.net:43300")]).unwrap();
+        assert!(o.spy_relay.contains(&(43300, "gp.example.net:43300".to_string())));
+        assert!(s.parse(&[], &[("NFSU2_SPY_RELAY", "")]).unwrap().spy_relay.is_empty());
+        assert!(s.parse(&[], &[]).unwrap().spy_relay.is_empty());
+        for e in ["29900host", "29900=host", "=host:1", "0=host:1", "65536=host:1", "29900=host:x", "29900=host:"] {
+            assert_eq!(
+                s.err(&[format!("--spy-relay={e}").as_str()], &[]),
+                format!("--spy-relay: 29900=gpcm.openspy.net:29900 (port=host:port), not \"{e}\"")
+            );
+        }
+        assert_eq!(
+            s.err(&["--spy-relay=20922=gp.example.net:29901"], &[]),
+            "--spy-relay: port 20922 is the online host's own service's port: the relay cannot take it"
+        );
+        assert_eq!(s.err(&["--spy-relay", "--online", "off"], &[]), "--spy-relay relays the online mode's connections: it needs --online on");
     }
 
     #[test]

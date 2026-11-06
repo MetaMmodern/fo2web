@@ -8,10 +8,12 @@
 //! - switch: frames to 10.77.0.1 -> [`OnlineHost`] -> vhost.rs (TCP, ICMP) -> the services below, by port:
 //!   20920 the redirector (@dir -> our lobby's address; no @tic: no RC4, no SSL), 20922 the lobby (login under any
 //!   name but a slur, personas, rooms, chat, games: lobby.rs), 13505 EA Messenger (friends, presence, messages,
-//!   invites: buddy.rs), 80 the news and terms pages the config names (http.rs)
+//!   invites: buddy.rs), 80 the news and terms pages the config names (http.rs), and, with --spy-relay, the ports
+//!   whose connections go to the real OpenSpy servers on the internet (spy.rs)
 //!
-//! Race traffic never comes here: the players' browsers send it to each other through the switch (UDP 3658, a star
-//! around the game's creator), as in LAN play.  Every address a player learns is a virtual one (10.77.x.x).
+//! Browser-to-browser LAN race traffic goes through the switch directly (UDP 3658). With `--spy-relay`, UDP 27901
+//! to the two distinct OpenSpy NAT servers and public-peer UDP go through spy_udp.rs instead; the browser's own
+//! address is still virtual, so a real peer can only reply to a gateway socket it has already contacted.
 //!
 //! What the server keeps: sessions, rooms, games and chat in memory only; on disk only the races' public results per
 //! persona (stats.rs) and each persona's friends list (buddy.rs), names only, under the server's --state directory,
@@ -39,6 +41,8 @@ mod jsx;
 mod lobby;
 mod omap;
 mod races;
+mod spy;
+mod spy_udp;
 mod stats;
 mod timers;
 mod trace;
@@ -73,6 +77,17 @@ pub const PORT_LOBBY: u16 = 20922;
 pub const PORT_BUDDY: u16 = 13505;
 pub const PORT_HTTP: u16 = 80;
 
+/// the OpenSpy servers `--spy-relay` forwards to when it is given no table of its own, by the port the game opens
+/// them on (spy.rs): the GameSpy presence, its search and the master server.  `--spy-relay`'s own entries stand in
+/// a default's place or add ports to it (options.rs `spy_table`).
+pub const SPY_DEFAULTS: [(u16, &str); 4] = [
+    (29900, "gpcm.openspy.net:29900"),
+    (29901, "gpsp.openspy.net:29901"),
+    (28900, "available.openspy.net:28900"),
+    // FlatOut 2's first browse connection is to flatout2pc.master.openspy.net:28910.
+    (28910, "flatout2pc.master.openspy.net:28910"),
+];
+
 /// a console line and the client it is for (None: the server's own), on the host's thread
 pub(crate) type LogFn = Rc<dyn Fn(&str, Option<&str>)>;
 
@@ -94,6 +109,9 @@ pub struct OnlineOptions {
     pub log: Arc<dyn Fn(&str, Option<&str>) + Send + Sync>,
     /// the dev trace: sees every frame the host sends (the switch's own tap sees what the browsers send)
     pub tap: Option<Tap>,
+    /// the OpenSpy relay's table (spy.rs): the game's connections to these ports go to the real servers on the
+    /// internet; empty: the relay is off (--spy-relay)
+    pub spy: Vec<(u16, String)>,
 }
 
 enum Event {
@@ -134,6 +152,7 @@ fn run(o: OnlineOptions, rx: mpsc::Receiver<Event>) {
         limits: Default::default(),
         buddy_limits: Default::default(),
         vhost: Default::default(),
+        spy: o.spy,
     });
     loop {
         let ev = match core.next_due() {

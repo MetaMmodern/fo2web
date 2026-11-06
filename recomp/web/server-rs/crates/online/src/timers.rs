@@ -32,6 +32,10 @@ pub enum Action {
     BuddyMail(u64),
     /// the friends lists' debounced save
     BuddySave,
+    /// the OpenSpy relay's drain: what the upstreams sent the game since the last (spy.rs)
+    SpyDrain,
+    /// OpenSpy NAT negotiation UDP replies (spy_udp.rs).
+    SpyUdpDrain,
 }
 
 /// a time in ms that orders (the queue never holds a NaN)

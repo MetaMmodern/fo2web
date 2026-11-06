@@ -951,6 +951,7 @@ static void *guest_thread_main(void *p){
     MR32(t->teb+0x00)=0xFFFFFFFFu; MR32(t->teb+0x04)=stack_hi; MR32(t->teb+0x08)=stack_lo;
     MR32(t->teb+0x18)=t->teb; MR32(t->teb+0x24)=t->ob?t->ob->tid:0;
     MR32(t->teb+0x2C)=t->teb+0x1000u; MR32(t->teb+0x30)=0x00C10000u;
+    { extern void win32_static_tls_init(uint32_t); win32_static_tls_init(t->teb); }
     /* stdcall: arg, then the return address */
     { CPU *c=&cpu; PUSH32(t->arg); PUSH32(0xDEAD7EADu); }
     __sync_fetch_and_add(&g_threads_started, 1);
@@ -1048,6 +1049,7 @@ static void *timer_thread_main(void *p){
     MR32(teb+0x00)=0xFFFFFFFFu; MR32(teb+0x04)=stack_hi; MR32(teb+0x08)=stack_lo;
     MR32(teb+0x18)=teb; MR32(teb+0x24)=999u;
     MR32(teb+0x2C)=teb+0x1000u; MR32(teb+0x30)=0x00C10000u;
+    { extern void win32_static_tls_init(uint32_t); win32_static_tls_init(teb); }
 
     for (;;){
         struct timespec ts = {0, 1000000L};      /* 1 ms */

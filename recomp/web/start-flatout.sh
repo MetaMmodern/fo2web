@@ -15,11 +15,11 @@ if [ ! -f "$DATA/FlatOut2.exe" ]; then
 fi
 if [ ! -x "$SERVER" ]; then
   echo "Missing server: $SERVER" >&2
-  echo "Run: cd recomp/web/server-rs && cargo build --release" >&2
+  echo "Run: recomp/web/server-rs/build.sh   (installs it to out/web/server-rs)" >&2
   exit 1
 fi
 if [ ! -f "$WEB/dist/main.js" ]; then
   echo "Missing web/dist/main.js; run: cd recomp/web && npm ci && node build.mjs" >&2
   exit 1
 fi
-exec "$SERVER" --data "$DATA" --http-port "$PORT" --online off --roam-hub off
+exec "$SERVER" --data "$DATA" --http-port "$PORT" --spy-relay --roam-hub off "$@"

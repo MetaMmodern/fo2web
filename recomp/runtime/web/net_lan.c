@@ -87,6 +87,11 @@ static int g_hello;
 #define DGQ_MAX     1024                    /* datagrams queued per socket */
 #define DGQ_BYTES   (1u << 20)
 #define CONNECT_TMO 3000000ull              /* us: no answer to a SYN (vlanhub: host unreachable after 3 s) */
+#ifdef FLATOUT2
+/* The OpenSpy relay resolves and connects upstream for up to 5 s before it
+ * acknowledges our SYN. Keep that distinct from the 3 s peer-LAN timeout. */
+#define SPY_CONNECT_TMO 6000000ull
+#endif
 #define TCP_CHUNK   (NET_MAX_PAYLOAD - NET_LAN_HDR)
 #define UDP_MAX     (NET_MAX_PAYLOAD - NET_LAN_HDR)
 
@@ -112,6 +117,19 @@ static int is_loop_n(uint32_t n){ return ((const uint8_t *)&n)[0] == 127; }
 static uint32_t own_n(void){ return H(g_vip); }
 static int online(void){ return MB && ld(&MB->page_state) == NET_PAGE_ONLINE && ld(&MB->vip) == g_vip; }
 static int in_subnet_h(uint32_t h){ return g_mask && (h & g_mask) == (g_vip & g_mask); }
+#ifdef FLATOUT2
+/* Never turn the OpenSpy UDP relay into a route to localhost, private services,
+ * multicast or reserved addresses. The server applies this check independently. */
+static int public_ip_h(uint32_t h){
+    unsigned a = h >> 24, b = (h >> 16) & 255, c = (h >> 8) & 255;
+    return a && a != 10 && a != 127 && a < 224 &&
+           !(a == 100 && b >= 64 && b <= 127) && !(a == 169 && b == 254) &&
+           !(a == 172 && b >= 16 && b <= 31) &&
+           !(a == 192 && (b == 0 || b == 168 || (b == 88 && c == 99))) &&
+           !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) &&
+           !(a == 203 && b == 0 && c == 113);
+}
+#endif
 static int bcast_h(uint32_t h){ return h == 0xFFFFFFFFu || (g_mask && h == ((g_vip & g_mask) | ~g_mask)); }
 static int peer_present_h(uint32_t h){
     if (!MB || !in_subnet_h(h)) return 0;
@@ -873,6 +891,11 @@ int vlan_connect(WsSock *s, uint32_t ip, uint16_t port){
     uint32_t lip = loop ? H(0x7F000001u) : own_n();
     s->laddr = lip; s->lport = v->bport;
     uint64_t now = now_us();
+    uint64_t deadline_us = CONNECT_TMO;
+#ifdef FLATOUT2
+    const char *spy = getenv("FO2_OPENSPY");
+    if (H(ip) == 0x0a4d0001u && (!spy || strcmp(spy, "0"))) deadline_us = SPY_CONNECT_TMO;
+#endif
     uint32_t cid; do arc4random_buf(&cid, sizeof cid); while (!cid);
     int e = 0;
     if (loop || self){
@@ -900,7 +923,7 @@ int vlan_connect(WsSock *s, uint32_t ip, uint16_t port){
         else if (!tx(NET_KIND_LAN_TCP, H(ip), v->bport, port, NET_LAN_TCP_SYN, 64, cid, 0, 0)){
             conn_free(a); S.tcp_timeout++; s->conn_ready_us = now + CONNECT_TMO; e = WSAETIMEDOUT;
         } else {
-            a->deadline = now + CONNECT_TMO;
+            a->deadline = now + deadline_us;
             s->fd = a->vfd; s->conn_id = cid;
             s->conn_ready_us = a->deadline;                      /* until the answer: vlan_conn_update */
             S.tcp_out++;
@@ -919,7 +942,7 @@ void vlan_conn_update(WsSock *s){
         uint64_t now = now_us();
         if (k->state == C_SYN_SENT && now >= k->deadline){
             k->state = C_FAILED; S.tcp_timeout++;
-            char b[16]; ws_log("virtual LAN: tcp connect to %s:%u: no answer in 3 s (WSAETIMEDOUT)", ipn(k->rip, b), k->rport);
+            char b[16]; ws_log("virtual LAN: tcp connect to %s:%u: no answer before deadline (WSAETIMEDOUT)", ipn(k->rip, b), k->rport);
         }
         if (k->state == C_EST){ s->conn_result = 0; s->conn_ready_us = 0; }
         else if (k->state == C_REFUSED){ s->conn_result = WSAECONNREFUSED; s->conn_ready_us = 0; }
@@ -970,6 +993,20 @@ int vlan_sendto(WsSock *s, const uint8_t *buf, int len, uint32_t ip, uint16_t po
         if (tx(NET_KIND_LAN_UDP, ip_h, v->bport, port, NET_LAN_UDP_DATA, (uint8_t)s->ip_ttl, 0, buf, (uint32_t)len)) sent_note(v, ip, port);
         if (port == RACE_PORT || v->bport == RACE_PORT) race_note(ip_h, 0);
     } else {
+#ifdef FLATOUT2
+        /* The switch only knows its virtual LAN. Send a public UDP destination
+         * to the OpenSpy gateway, carrying the original IPv4 in the unused
+         * datagram connection-id field. Replies retain the public source IP. */
+        static int spy_on = -1;
+        if (spy_on < 0){ const char *e = getenv("FO2_OPENSPY"); spy_on = !e || strcmp(e, "0"); }
+        if (spy_on && port && public_ip_h(ip_h)){
+            if (tx(NET_KIND_LAN_UDP, 0x0a4d0001u, v->bport, port, NET_LAN_UDP_DATA,
+                   (uint8_t)s->ip_ttl, ip_h, buf, (uint32_t)len)) sent_note(v, ip, port);
+            pthread_mutex_unlock(&g_mu);
+            bump();
+            return 0;
+        }
+#endif
         S.udp_outside++;
         static uint32_t said[8]; static int ns;
         int k; for (k = 0; k < ns && said[k] != ip; k++) {}

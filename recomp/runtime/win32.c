@@ -260,7 +260,21 @@ uint64_t g_win32_calls = 0, g_win32_unimpl = 0;
 
 static uint32_t tls_slot[128]; static int tls_next = 0;
 static uint32_t tls_free[128]; static int tls_nfree = 0;
-int win32_tls_in_use(void){ return tls_next - tls_nfree; }
+extern uint32_t g_pe_tls_index_va, g_pe_tls_template_va, g_pe_tls_raw_size;
+int win32_tls_in_use(void){ return tls_next - tls_nfree - (g_pe_tls_index_va != 0); }
+
+/* The last 2 KB of every 8 KB TEB reservation holds the EXE's static TLS
+ * template. TEB+0x1000 is its 256-entry TLS pointer array (1 KB). This is
+ * separate from the CRT thread-data blocks installed by TlsSetValue. */
+void win32_static_tls_init(uint32_t teb){
+    if (!g_pe_tls_index_va) return;
+    uint32_t block = teb + 0x1800u;
+    memset(g_mem + block, 0, 0x800u);
+    /* The trailing zero fill is already present in the cleared TEB. */
+    if (g_pe_tls_raw_size)
+        memcpy(g_mem + block, g_mem + g_pe_tls_template_va, g_pe_tls_raw_size);
+    MR32(teb + 0x1000u) = block;
+}
 static uint32_t g_cmdline = 0;
 static uint64_t tick0;
 
@@ -609,7 +623,8 @@ int win32_call(CPU *c, uint32_t idx){
     else if (!strcmp(n,"GetCPInfo")){ uint32_t p=ARG(c,1); if(p){ mem_commit(p,20); memset(g_mem+p,0,20); MR32(p)=1; } r=1; }
     else if (!strcmp(n,"IsValidCodePage"))       r = 1;
     else if (!strcmp(n,"TlsAlloc") || !strcmp(n,"FlsAlloc")){
-        /* freed indices first (server.dll's CRT takes one per load and frees
+        /* Static PE TLS occupies index 0; freed dynamic indices first
+         * (server.dll's CRT takes one per load and frees
          * it on unload; with no reuse, hosting would stop working after
          * ~120 sessions) */
         if (tls_nfree) r = tls_free[--tls_nfree];
@@ -629,7 +644,7 @@ int win32_call(CPU *c, uint32_t idx){
          * this index reads NULL everywhere: here the main TEB, the created
          * threads' TEBs (0x00C20000 + 0x2000 n) and the timer thread's. */
         uint32_t i = ARG(c,0); r = 0;
-        if (i < (uint32_t)tls_next){
+        if (i < (uint32_t)tls_next && (!g_pe_tls_index_va || i != 0)){
             int dup = 0; for (int k = 0; k < tls_nfree; k++) dup |= tls_free[k] == i;
             if (!dup && tls_nfree < 128){
                 tls_slot[i] = 0;
@@ -932,11 +947,26 @@ int win32_call(CPU *c, uint32_t idx){
 }
 
 void win32_init(void){
+    tls_next = g_pe_tls_index_va ? 1 : 0;
     g_nimps = g_imp_count + g_srv_imp_count + DYN_IMP_COUNT;
     g_imps = calloc(g_nimps ? g_nimps : 1, sizeof *g_imps);
     memcpy(g_imps, g_imp, g_imp_count * sizeof *g_imps);
     if (g_srv_imp_count) memcpy(g_imps + g_imp_count, g_srv_imp, g_srv_imp_count * sizeof *g_imps);
     memcpy(g_imps + g_imp_count + g_srv_imp_count, g_dyn_imp, sizeof g_dyn_imp);
+    /* __WSAFDIsSet is WSAAPI/stdcall(SOCKET, fd_set *). The lifted FO2
+     * table inferred zero arguments for its ordinal import. Leaving the two
+     * arguments on the guest stack made 005ea0d0 restore them as EDI/ESI
+     * and return through a saved word, corrupting both search and the menu.
+     * Normalize the ABI at binding time, including older generated lifts. */
+    for (uint32_t i = 0; i < g_nimps; i++) {
+        if (strcasecmp(g_imps[i].dll, "ws2_32.dll") &&
+            strcasecmp(g_imps[i].dll, "wsock32.dll")) continue;
+        if (!strcmp(g_imps[i].name, "__WSAFDIsSet")) g_imps[i].nargs = 2;
+        /* The same lift missed these two signatures too. ABI cleanup is
+         * required even when an API falls through to an unsupported stub. */
+        else if (!strcmp(g_imps[i].name, "WSAAsyncGetHostByName")) g_imps[i].nargs = 6;
+        else if (!strcmp(g_imps[i].name, "WSACancelAsyncRequest")) g_imps[i].nargs = 1;
+    }
     stat_ = calloc(g_nimps ? g_nimps : 1, sizeof *stat_);
     heap_init();
     g_hk = calloc(g_nimps ? g_nimps : 1, 1);

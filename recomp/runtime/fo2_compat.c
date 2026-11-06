@@ -2,6 +2,8 @@
  * by the shared Win32/COM runtime. FlatOut does not install those hooks. */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "cpu.h"
 #include "decls.h"
 #include "fo2_default_binds.h"
@@ -53,6 +55,45 @@ static void fo2_memcpy(CPU *c){
 
 static void fo2_bind_warn(const char *msg){ fprintf(stderr, "%s\n", msg); }
 
+/* FlatOut 2's GameSpy integration hard-codes the dead GameSpy domains
+ * ("gamespy.com") in eleven places in its .rdata: the master-server list, the
+ * NAT-negotiation hosts, the stats collector and the ladder URL.  ZPatch's
+ * "UseOpenSpy" replaces each with "openspy.net" -- the same eleven bytes, so
+ * every prefix ("master.", "%s.", "natneg") and suffix ("/games/st_ladder/
+ * web/playerposition.asp") is untouched and no other pointer changes.  This
+ * matches ZPatchFO2.asi's UseOpenSpy routine (100061a0 -> 100074b0), but it
+ * only selects the hostnames. In the browser the Winsock emulator and server
+ * gateway must still implement the game's TCP, UDP, and peer traffic.
+ * FO2_OPENSPY=0 turns the patch off for comparison. */
+static void fo2_openspy_patch(void){
+    static const uint32_t addrs[] = {
+        0x00656560u, 0x00656574u, 0x00676c89u, 0x00676d6au, 0x00676d83u,
+        0x00676d9bu, 0x00676db0u, 0x00677783u, 0x00681cf2u, 0x00681d85u,
+        0x00681dc5u,
+    };
+    static const char old[11] = "gamespy.com", new_[11] = "openspy.net";
+    const char *e = getenv("FO2_OPENSPY");
+    if (e && !strcmp(e, "0")) return;
+    unsigned n = 0;
+    for (unsigned i = 0; i < sizeof addrs / sizeof addrs[0]; i++){
+        uint32_t a = addrs[i];
+        if (!mem_is_committed(a) || !mem_is_committed(a + 11u)){
+            fprintf(stderr, "[fo2] openspy: guest .rdata not loaded yet at 0x%08x (called too early?)\n", a);
+            continue;
+        }
+        int match = 1;
+        for (unsigned j = 0; j < 11; j++)
+            if (MR8(a + j) != (uint8_t)old[j]){ match = 0; break; }
+        if (!match){
+            fprintf(stderr, "[fo2] openspy: no GameSpy string at 0x%08x (another game version?)\n", a);
+            continue;
+        }
+        for (unsigned j = 0; j < 11; j++) MR8(a + j) = (uint8_t)new_[j];
+        n++;
+    }
+    fprintf(stderr, "[fo2] openspy: %u of 11 GameSpy host names now point at OpenSpy\n", n);
+}
+
 void fo2_compat_install(void){
     extern void dispatch_patch(uint32_t, void (*)(CPU *));
     /* 0x5610a5..0x5610b3 are a computed jump table into a row of MOVSDs.
@@ -70,5 +111,6 @@ void fo2_compat_install(void){
     /* Called by the web main after mem_load_pe/win32_init: the defaults table
      * is read only now, and only the table changes -- a saved mapping is
      * loaded separately by sub_00553220 and is never touched here. */
+    fo2_openspy_patch();
     fo2_default_binds_apply(fo2_bind_warn);
 }

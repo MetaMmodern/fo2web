@@ -94,6 +94,7 @@ pub fn online_host() -> (Arc<OnlineHost>, Arc<Mutex<Vec<String>>>) {
         state_dir: None,
         log: Arc::new(move |line: &str, _key: Option<&str>| l2.lock().unwrap().push(line.to_string())),
         tap: None,
+        spy: Vec::new(),
     });
     (h, lines)
 }

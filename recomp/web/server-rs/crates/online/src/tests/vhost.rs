@@ -53,6 +53,7 @@ fn host(o: VhostLimits) -> (Core, Arc<Mutex<Vec<F>>>) {
         limits: Default::default(),
         buddy_limits: Default::default(),
         vhost: o,
+        spy: Vec::new(),
     });
     core.vh.listeners.clear();
     let out: Arc<Mutex<Vec<F>>> = Arc::default();

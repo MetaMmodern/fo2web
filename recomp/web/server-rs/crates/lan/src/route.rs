@@ -75,6 +75,12 @@ impl StreamQueue {
 }
 
 impl LanSwitch {
+    /// The last two addresses of the 10.77.0.0/19 switch subnet are reserved
+    /// for FlatOut's two OpenSpy NAT-negotiation UDP hosts, not handed to peers.
+    fn is_online_destination(&self, dst: u32) -> bool {
+        self.online_vip == Some(dst)
+            || (self.online_vip == Some(0x0a4d_0001) && (dst == 0x0a4d_1ffe || dst == 0x0a4d_1ffd))
+    }
     /// One frame, to each of `dsts` in turn (the frame's own destination, or a bundle entry's list): from peer to the
     /// browsers each reaches, the free-roam hub or the Online host, within peer's budgets.  False: over them (what
     /// follows in a bundle goes too).
@@ -103,7 +109,7 @@ impl LanSwitch {
         }
         // the frame's own copy for the browsers' queues, not the sender's read block (the crate doc's one copy)
         let own_copy;
-        let data = if dsts.clone().take(paid).any(|d| Some(d) != self.roam_vip && Some(d) != self.online_vip) {
+        let data = if dsts.clone().take(paid).any(|d| Some(d) != self.roam_vip && !self.is_online_destination(d)) {
             own_copy = compact::mark(data);
             &own_copy
         } else {
@@ -140,7 +146,7 @@ impl LanSwitch {
             }
             return;
         }
-        if self.online_vip == Some(dst) {
+        if self.is_online_destination(dst) {
             if let Some(online) = &self.online {
                 // what the host sends while it handles the frame is charged to the sender's budgets
                 let cause = Arc::new(Cause {

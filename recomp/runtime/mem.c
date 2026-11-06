@@ -18,6 +18,10 @@ CPU *g_cur_cpu = 0;
 uint8_t *g_mem = 0;
 #endif
 uint32_t g_image_base = 0x400000u, g_res_dir_va = 0, g_res_dir_size = 0;
+/* PE static TLS belongs to the loader, not to TlsAlloc. The executable's
+ * index is 0; later dynamic TLS allocations start at 1. */
+uint32_t g_pe_tls_index_va = 0, g_pe_tls_template_va = 0;
+uint32_t g_pe_tls_raw_size = 0;
 
 /* watch state: must be defined in every build (debug.c is optional) */
 uint32_t g_itrace[ITRACE_SIZE];
@@ -296,6 +300,30 @@ int mem_load_pe(const char *path){
         uint32_t n = rsize < vsize ? rsize : vsize;
         memcpy(g_mem + base + va, buf + roff, n);
         fprintf(stderr,"  loaded %-9s -> 0x%08x  %u bytes\n", nm[0]?nm:"<unnamed>", base+va, n);
+    }
+    /* PE32 IMAGE_TLS_DIRECTORY: template VAs, index VA, callbacks, zero fill.
+     * Keep metadata for the guest TEB setup in win32.c. */
+    g_pe_tls_index_va = g_pe_tls_template_va = g_pe_tls_raw_size = 0;
+    if (optsz >= 96 + 10*8){
+        uint32_t dir_rva = *(uint32_t*)(nt + 24 + 96 + 9*8);
+        uint32_t dir_size = *(uint32_t*)(nt + 24 + 96 + 9*8 + 4);
+        if (dir_rva && dir_size >= 24 && imgsz >= 24 && dir_rva <= imgsz - 24){
+            uint32_t *tls = (uint32_t*)(g_mem + base + dir_rva);
+            uint32_t start = tls[0], end = tls[1], index = tls[2], zero = tls[4];
+            uint64_t size = end >= start ? (uint64_t)(end - start) + zero : 0;
+            if (index >= base && index <= base + imgsz - 4 &&
+                start >= base && end >= start && end <= base + imgsz &&
+                size <= 0x800u){
+                g_pe_tls_index_va = index;
+                g_pe_tls_template_va = start;
+                g_pe_tls_raw_size = end - start;
+                MR32(index) = 0; /* the executable's loader-assigned index */
+                fprintf(stderr,"  static TLS: index 0, %u template bytes + %u zero bytes\n", end - start, zero);
+            } else {
+                fprintf(stderr,"  static TLS: unsupported template or index (index=%08x size=%llu)\n",
+                        index, (unsigned long long)size);
+            }
+        }
     }
     free(buf);
     fprintf(stderr,"  image 0x%08x .. 0x%08x   resource directory 0x%08x (%u bytes)\n",

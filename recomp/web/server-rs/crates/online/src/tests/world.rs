@@ -125,6 +125,7 @@ impl World {
             limits: o.limits,
             buddy_limits: o.buddy,
             vhost: VhostLimits::default(),
+            spy: Vec::new(),
         });
         let outbox: Outbox = Arc::default();
         let slow: Arc<Mutex<HashSet<u32>>> = Arc::default();

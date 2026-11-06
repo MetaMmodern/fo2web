@@ -62,10 +62,13 @@ HDRSUM="$( (cat runtime/cpu.h runtime/web/compat/wasm_plat.h; echo "$CFLAGS $SHA
   xargs -P "$J" -n 2 sh -c '
   case "$1" in all) od="$OUT/obj" ;; *) od="$OUT/obj/srv" ;; esac
   src="gen/$1/$2"; obj="$od/$(basename "$2" .c).o"
-  sum=$( (cat "$src" "gen/$1/decls.h"; echo "$HDRSUM") | shasum | cut -c1-40)
-  if [ -z "$FULL" ] && [ -f "$obj" ] && [ "$(cat "$obj.sum" 2>/dev/null)" = "$sum" ]; then exit 0; fi
+  # the MEMCHECK flag is part of the key, set before any cache check: applying
+  # it only afterwards kept an already-built unchecked object and silently
+  # produced a build without the bounds checks
   mc=""; case ",$MEMCHECK," in *",$(basename "$2" .c),"*) mc="-DNFSU2_MEMCHECK" ;; esac
+  sum=$( (cat "$src" "gen/$1/decls.h"; echo "$HDRSUM") | shasum | cut -c1-40)
   [ -n "$mc" ] && sum="$sum-memchk"
+  if [ -z "$FULL" ] && [ -f "$obj" ] && [ "$(cat "$obj.sum" 2>/dev/null)" = "$sum" ]; then exit 0; fi
   if [ -z "$FULL" ] && [ -f "$obj" ] && [ "$(cat "$obj.sum" 2>/dev/null)" = "$sum" ]; then exit 0; fi
   # shared, content-addressed cache: every worktree with the same shard, cpu.h
   # and flags reuses one compile
@@ -97,7 +100,7 @@ HDRSUM="$( (cat runtime/cpu.h runtime/web/compat/wasm_plat.h; echo "$CFLAGS $SHA
 # FlatOut's lifted image already owns several addresses that the NFSU2 patch
 # modules override. Exclude those NFS-only patch objects or wasm-ld sees the
 # same guest function twice (and silently prevents a FlatOut link).
-RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope fo2_compat flatout_alt_key debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
+RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope fo2_compat flatout_alt_key flatout_spy_dbg debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie"
 WEB="$(cd runtime/web && ls *.c | sed 's/\.c$//')"
 # Runtime membership is build-configuration-dependent. Remove stale objects
 # from a previous NFS build before linking, otherwise an omitted patch module
@@ -126,6 +129,21 @@ rm -f "$OUT/nfsu2.wasm"
 # when the original found no key.
 $CC $TARGET $OPT $FEAT -o "$OUT/nfsu2.wasm" $OBJS \
   -Wl,--wrap=sub_0055aca0 \
+  -Wl,--wrap=sub_005ea310 \
+  -Wl,--wrap=sub_005e9350 \
+  -Wl,--wrap=sub_005e89b0 \
+  -Wl,--wrap=sub_005e9330 \
+  -Wl,--wrap=sub_005e5700 \
+  -Wl,--wrap=sub_005e84e0 \
+  -Wl,--wrap=sub_005e6760 \
+  -Wl,--wrap=sub_005e6c90 \
+  -Wl,--wrap=sub_005e6d90 \
+  -Wl,--wrap=sub_00518fe0 \
+  -Wl,--wrap=sub_00503cd0 \
+  -Wl,--wrap=sub_00503830 \
+  -Wl,--wrap=sub_005ea0d0 \
+  -Wl,--wrap=sub_005f5b30 \
+  -Wl,--wrap=sub_00519dd0 \
   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296 \
   -Wl,--initial-memory=$(( INITIAL_MB * 1048576 )),--global-base=$GUEST_END \
   -Wl,-z,stack-size=$(( 8 * 1048576 )) -Wl,--no-stack-first \

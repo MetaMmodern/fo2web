@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 
 use crate::buddy::{Buddies, BuddyLimits};
 use crate::lobby::{Limits, Lobby};
+use crate::spy;
+use crate::spy_udp;
 use crate::stats::{Stats, StatsOptions};
 use crate::timers::{Action, TimerId, Timers};
 use crate::vhost::{Listener, VHost, VhostLimits};
@@ -30,6 +32,9 @@ pub struct CoreOptions {
     pub limits: Limits,
     pub buddy_limits: BuddyLimits,
     pub vhost: VhostLimits,
+    /// the OpenSpy relay's table (spy.rs): the game's connections to these ports go to the real servers on the
+    /// internet; empty: the relay is off
+    pub spy: Vec<(u16, String)>,
 }
 
 pub struct Core {
@@ -52,6 +57,10 @@ pub struct Core {
     pub buddies: Buddies,
     /// the races' results (stats.rs): the lobby records them, EA Messenger's search reads their names
     pub stats: Stats,
+    /// the OpenSpy relay (spy.rs)
+    pub spy: spy::Spy,
+    /// OpenSpy's UDP NAT-negotiation hosts and contacted public peers, isolated from TCP.
+    pub spy_udp: spy_udp::SpyUdp,
     /// (tests) what a service probe was told
     #[cfg(test)]
     pub probe: Vec<String>,
@@ -62,11 +71,16 @@ pub struct Core {
 
 impl Core {
     pub fn new(o: CoreOptions) -> Core {
+        let spy_on = !o.spy.is_empty();
         let mut vh = VHost::new(o.vhost);
         vh.listen(PORT_REDIRECTOR, Listener::Redirector);
         vh.listen(PORT_LOBBY, Listener::Lobby);
         vh.listen(PORT_BUDDY, Listener::Buddy);
         vh.listen(PORT_HTTP, Listener::Http);
+        // the OpenSpy relay's ports (spy.rs): its listeners only when the operator asked for the relay
+        for (port, _) in &o.spy {
+            vh.listen(*port, Listener::SpyRelay);
+        }
         let stats = Stats::new(StatsOptions::new(o.state_dir.clone(), o.clocks.clone(), o.log.clone()));
         let mut core = Core {
             clocks: o.clocks,
@@ -83,6 +97,8 @@ impl Core {
             lobby: Lobby::new(o.limits),
             buddies: Buddies::new(o.state_dir, o.buddy_limits),
             stats,
+            spy: spy::Spy::new(o.spy),
+            spy_udp: spy_udp::SpyUdp::new(spy_on),
             #[cfg(test)]
             probe: Vec::new(),
             #[cfg(test)]
@@ -131,6 +147,7 @@ impl Core {
 
     pub fn peer_gone(&mut self, vip: u32) {
         self.here.remove(&vip);
+        self.spy_udp_peer_gone(vip);
         self.vh_peer_gone(vip);
         let now = (self.clocks.now)();
         self.lobby.peer_gone(vip, now);
@@ -179,6 +196,8 @@ impl Core {
             Action::Presence(b) => self.presence_timer(b),
             Action::BuddyMail(b) => self.buddy_mail_timer(b),
             Action::BuddySave => self.buddy_save_timer(),
+            Action::SpyDrain => self.spy_drain(),
+            Action::SpyUdpDrain => self.spy_udp_drain(),
         }
     }
 

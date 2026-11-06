@@ -6,7 +6,7 @@
 //!   RST.  The WebSocket and the switch are reliable and ordered (no retransmission, as between browsers:
 //!   runtime/web/net_lan.c)
 //! - kind 5 (ICMP): echo requests answered (the game's ProtoPing shows the server's round trip)
-//! - kind 3 (UDP): nothing listens: "port unreachable", as a host would answer
+//! - kind 3 (UDP): with --spy-relay, OpenSpy NAT hosts and contacted public peers; otherwise "port unreachable"
 //!
 //! Frame layout (big-endian, net_proto.h): [0] kind, [4..7] source vip (the switch wrote the sender's own), [8..11]
 //! destination vip, [12..13] source port, [14..15] destination port, then the 8-byte LAN header ([16] op, [17] ttl,
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use nfsu2_util::{FrameCtx, SendResult};
 
 use crate::core::Core;
-use crate::{VHOST_VIP, http};
+use crate::{VHOST_VIP, http, spy};
 
 pub type ConnId = u64;
 
@@ -70,6 +70,8 @@ pub enum Listener {
     Lobby,
     Buddy,
     Http,
+    /// `--spy-relay`: the game's connection goes to a real OpenSpy server on the internet (spy.rs)
+    SpyRelay,
     /// (tests) a service that records what it is told, ends its side when the browser ends its own
     #[cfg(test)]
     Probe,
@@ -86,6 +88,8 @@ pub enum Svc {
     Lobby(u64),
     Buddy(u64),
     Http,
+    /// the OpenSpy relay's (spy.rs)
+    Spy,
     #[cfg(test)]
     Probe,
 }
@@ -146,6 +150,8 @@ pub struct VHost {
     pub stats: VhStats,
     pub redirs: HashMap<ConnId, Redir>,
     pub https: HashMap<ConnId, http::HttpConn>,
+    /// the OpenSpy relay's connections: the queues between the host's thread and their pumps (spy.rs)
+    pub spys: HashMap<ConnId, spy::SpyConn>,
 }
 
 impl VHost {
@@ -160,6 +166,7 @@ impl VHost {
             stats: VhStats::default(),
             redirs: HashMap::new(),
             https: HashMap::new(),
+            spys: HashMap::new(),
         }
     }
     pub fn listen(&mut self, port: u16, l: Listener) {
@@ -232,6 +239,7 @@ impl Core {
             return;
         }
         let (kind, sport, dport, op) = (data[0], be16(data, 12), be16(data, 14), data[F_DATA]);
+        let dst = u32::from_be_bytes(data[8..12].try_into().expect("frame header"));
         let cid = le32(data, F_DATA + 4);
         let payload = &data[F_DATA + LAN_HDR..];
         if kind == K_ICMP {
@@ -251,8 +259,11 @@ impl Core {
             if op == UDP_UNREACH {
                 return;
             }
+            if op == 0 && self.spy_udp_send(from, sport, dst, dport, cid, payload) {
+                return;
+            }
             self.vh.stats.udp_unreach += 1;
-            self.out(from, lan_frame(K_UDP, VHOST_VIP, from, dport, sport, UDP_UNREACH, 0, &[]));
+            self.out(from, lan_frame(K_UDP, dst, from, dport, sport, UDP_UNREACH, 0, &[]));
             return;
         }
         if kind != K_TCP {
@@ -272,6 +283,8 @@ impl Core {
                 self.vh.stats.syn_in += 1;
                 let Some(l) = self.vh.listeners.get(&dport).copied() else {
                     self.vh.stats.refused += 1;
+                    // the relay on: one line per port the game asked for and the table has no upstream for
+                    self.spy_no_upstream(dport);
                     return rst(self);
                 };
                 if self.vh.conns.len() >= self.vh.o.max_conns || self.vh.per_vip.get(&from).copied().unwrap_or(0) >= self.vh.o.per_vip {
@@ -298,13 +311,20 @@ impl Core {
                 );
                 self.vh.by_key.insert((from, sport, cid), id);
                 *self.vh.per_vip.entry(from).or_insert(0) += 1;
-                self.out(from, lan_frame(K_TCP, VHOST_VIP, from, dport, sport, SYNACK, cid, &[]));
+                // An internet relay is not connected merely because the virtual host accepted the SYN.
+                // Its pump sends SYNACK only after the real upstream connect succeeds; on failure it RSTs.
+                if l != Listener::SpyRelay {
+                    self.out(from, lan_frame(K_TCP, VHOST_VIP, from, dport, sport, SYNACK, cid, &[]));
+                }
                 self.on_connect(l, id);
             }
             DATA => {
                 let Some(id) = c else { return rst(self) };
                 let conn = self.vh.conns.get_mut(&id).expect("indexed");
                 if conn.rx_fin {
+                    return;
+                }
+                if conn.svc == Svc::Spy && !self.vh.spys.get(&id).is_some_and(|s| s.ready) {
                     return;
                 }
                 conn.bytes_in += payload.len() as u64;
@@ -437,6 +457,7 @@ impl Core {
             Listener::Lobby => self.lobby_connect(id),
             Listener::Buddy => self.buddy_connect(id),
             Listener::Http => self.http_connect(id),
+            Listener::SpyRelay => self.spy_connect(id),
             #[cfg(test)]
             Listener::Probe => self.set_svc(id, Svc::Probe),
             #[cfg(test)]
@@ -458,6 +479,7 @@ impl Core {
             Svc::Lobby(s) => self.lobby_data(s, payload),
             Svc::Buddy(b) => self.buddy_data(b, payload),
             Svc::Http => self.http_data(id, payload),
+            Svc::Spy => self.spy_data(id, payload),
             #[cfg(test)]
             Svc::Probe => self.probe.push(format!("data {}", String::from_utf8_lossy(payload))),
         }
@@ -481,6 +503,8 @@ impl Core {
                     self.conn_end(id);
                 }
             }
+            // the game's FIN goes upstream; the game's own FIN waits for the upstream's close (spy.rs)
+            Svc::Spy => self.spy_end(id),
             #[cfg(test)]
             Svc::Probe => {
                 self.probe.push("end".into());
@@ -503,6 +527,10 @@ impl Core {
                 if let Some(t) = self.vh.https.remove(&id).and_then(|h| h.timer) {
                     self.timers.clear(t);
                 }
+            }
+            // the queues go: the pump sees its queues' end and ends (spy.rs)
+            Svc::Spy => {
+                self.vh.spys.remove(&id);
             }
             #[cfg(test)]
             Svc::Probe => self.probe.push(format!("close {why}")),

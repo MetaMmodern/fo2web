@@ -1922,6 +1922,32 @@ static uint32_t ws_gethostbyname(CPU *c){
         if (!said++) ws_log("online: %s is the server's online host 10.77.0.1", ONLINE_HOST);
         ips[0] = mkip(10, 77, 0, 1); return make_hostent(c, ONLINE_HOST, ips, 1);
     }
+#ifdef FLATOUT2
+    /* NAT negotiation uses the same UDP port (27901) on two *different*
+     * OpenSpy servers. Preserve which one the game asked for; one gateway IP
+     * for all *.openspy.net hosts cannot distinguish them by port. */
+    if (g_ws_mode == NET_VLAN && !env_off(getenv("FO2_OPENSPY"))){
+        uint8_t nat = !strcasecmp(name, "natneg1.openspy.net") ? 1 :
+                      !strcasecmp(name, "natneg2.openspy.net") ? 2 : 0;
+        if (nat){
+            ips[0] = mkip(10, 77, 31, nat == 1 ? 254 : 253);
+            return make_hostent(c, name, ips, 1);
+        }
+    }
+    /* OpenSpy (FO2_OPENSPY; fo2_compat.c rewrites the guest's GameSpy host
+     * strings): every *.openspy.net host the game asks for is the server's
+     * relay at 10.77.0.1, which pipes the connection on to the real OpenSpy
+     * host on the internet. */
+    if (g_ws_mode == NET_VLAN && !env_off(getenv("FO2_OPENSPY"))){
+        size_t n = strlen(name);
+        if (n == 11 ? !strcasecmp(name, "openspy.net")
+                    : (n > 12 && !strcasecmp(name + n - 12, ".openspy.net"))){
+            static int said;
+            if (!said++) ws_log("openspy: *.openspy.net is the server's relay 10.77.0.1");
+            ips[0] = mkip(10, 77, 0, 1); return make_hostent(c, name, ips, 1);
+        }
+    }
+#endif
     if (g_ws_mode != NET_LAN){
         st_blocked++;
         if (st_blocked <= 200) ws_log("BLOCKED dns \"%s\" (mode %s) from 0x%08x", name, mode_name(g_ws_mode), c->eip);

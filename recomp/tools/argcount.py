@@ -179,6 +179,7 @@ KNOWN={
  'send':4,'recv':4,'sendto':6,'recvfrom':6,'closesocket':1,'select':5,'ioctlsocket':3,
  'setsockopt':5,'getsockopt':5,'htons':1,'ntohs':1,'htonl':1,'ntohl':1,'inet_addr':1,
  'inet_ntoa':1,'gethostbyname':1,'gethostname':2,'WSAGetLastError':0,'getsockname':3,
+ '__WSAFDIsSet':2,'WSAAsyncGetHostByName':6,'WSACancelAsyncRequest':1,
  'GetFileTime':4,
 }
 hit=miss=0; rows=[]
