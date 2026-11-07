@@ -35,6 +35,25 @@ ports; give each its own `--state`.  Knobs for measurements, from the environmen
 | `NFSU2_COMPRESS_THREADS` | the threads that compress the game data's blocks once at brotli's best into the state folder's `blocks/` (src/app/kept.rs; default 2, at the lowest priority, waiting while the CPU quota the server shares is 70 % used; 0: none, every block compressed as it is sent) |
 | `NFSU2_REPO` | where the defaults are (web/dist, out/web/nfsu2.wasm, the state in out/web/server): the repo it was built from |
 
+## Public peer UDP mapping (opt-in)
+
+Online mode's UDP relay sends to a peer's advertised public endpoint. If that endpoint is a NAT/public translation the
+server cannot reach, an operator can pin an explicit public-to-private route:
+
+    FO2_SPY_UDP_PEER_MAP='212.47.146.210:5571=192.168.100.30:23756'
+
+Pairs are comma-separated; at most 16 are used. The advertised side must be a public unicast endpoint, both ports must
+be nonzero, and the actual side must be RFC1918 unicast outside the switch's virtual `10.77.0.0/19`. Malformed entries
+and duplicate public or actual endpoints fail closed: the whole map is ignored, so the default public-only behavior
+remains. Replies to the game are shown as coming from the advertised public IP and port.
+
+This is operator configuration, not client-controlled NAT traversal: a client cannot choose a private destination, and
+only the fixed pairs above are routed. It does not create a port forward, and it does not make a peer on the internet
+reachable. The server must be on the same LAN as the actual endpoint and able to reach it; internet play through this
+mapping has not been established. Only map endpoints you control. The private address stays out of the game-visible
+frames, but it is in the server's environment and the bounded `FO2_SPY_UDP_TRACE` output can include the actual
+destination, so keep both out of shared logs.
+
 ## The container image
 
 `web/server-rs/Dockerfile` (its own `.dockerignore` next to it): the page, the mounts (`/game`, `/module`,

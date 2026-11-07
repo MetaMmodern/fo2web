@@ -419,6 +419,11 @@ static void unreach_deliver(uint32_t src_n, uint16_t sport, uint16_t dport){
     }
     VSock *to = sender ? sender : conn ? conn : first;
     if (sender) S.unreach_sender++; else if (conn) S.unreach_conn++; else if (first) S.unreach_first++; else S.unreach_none++;
+    /* Which address the game queries in vain: the join's server address and
+     * port, so a missing listener can be told from a wrong destination. */
+    { static unsigned shown; if (shown++ < 16){ char b[16];
+        ws_log("virtual LAN: no UDP listener at %s:%u for our port %u (%s)", ipn(src_n, b),
+               sport, dport, sender ? "sender" : conn ? "connected" : first ? "binder" : "nobody"); } }
     if (to) dg_push(to, src_n, sport, 1, 0, 0);
 }
 /* a unicast from v to ip:port on the switch (network order) */
@@ -1000,6 +1005,8 @@ int vlan_sendto(WsSock *s, const uint8_t *buf, int len, uint32_t ip, uint16_t po
         static int spy_on = -1;
         if (spy_on < 0){ const char *e = getenv("FO2_OPENSPY"); spy_on = !e || strcmp(e, "0"); }
         if (spy_on && port && public_ip_h(ip_h)){
+            { static unsigned shown; if (shown++ < 16)
+                ws_log("virtual LAN: datagram to public %s:%u sent through the OpenSpy gateway", ipn(ip, b), port); }
             if (tx(NET_KIND_LAN_UDP, 0x0a4d0001u, v->bport, port, NET_LAN_UDP_DATA,
                    (uint8_t)s->ip_ttl, ip_h, buf, (uint32_t)len)) sent_note(v, ip, port);
             pthread_mutex_unlock(&g_mu);

@@ -42,6 +42,13 @@ void guest_wait_end(void){ }
 void online_lobby_read(uint32_t link, const uint8_t *p, int n){ (void)link; (void)p; (void)n; }   /* online.c */
 void olfilter_lobby_mark(uint32_t link, uint8_t *p, int n){ (void)link; (void)p; (void)n; }       /* olfilter.c */
 void olfilter_lobby_sent(uint32_t link, uint8_t *p, int n){ (void)link; (void)p; (void)n; }
+/* A single manual-reset event for the standalone overlapped-I/O checks. */
+static int test_event_signaled;
+uint32_t win32_event_new(void){ return 1; }
+int win32_event_set(uint32_t h){ (void)h; test_event_signaled = 1; return 1; }
+int win32_event_reset(uint32_t h){ (void)h; test_event_signaled = 0; return 1; }
+int win32_event_close(uint32_t h){ (void)h; return 1; }
+int win32_event_wait(const uint32_t *hs, int n, int all, uint32_t ms){ (void)hs; (void)n; (void)all; (void)ms; return test_event_signaled ? 0 : -1; }
 
 static int g_pass, g_fail;
 static void check(const char *what, int ok, const char *fmt, ...){
@@ -54,6 +61,7 @@ static void check(const char *what, int ok, const char *fmt, ...){
 /* ---- guest memory: plain linear memory in the test (g_mem == 0 on wasm) ---- */
 static uint8_t g_teb[0x1000] __attribute__((aligned(16)));
 static uint32_t g_args[16];
+static uint32_t g_wsabuf[2], g_iobytes, g_ioflags, g_overlapped[5];
 static uint8_t g_buf[8192], g_buf2[8192], g_sa[16], g_sa2[16], g_len[4], g_wsa[400], g_set[3][4 + 4 * 64], g_tv[8], g_opt[8], g_ncb[64], g_ast[64];
 static CPU g_cpu;
 #define GA(p) ((uint32_t)(uintptr_t)(p))
@@ -193,6 +201,41 @@ int main(void){
     r = WS("sendto", 6, u3, GA(g_buf), 9u, 0u, sa(g_sa, ipn(10, 77, 0, 3), 3658), 16u);
     got = tx_take(&f);
     check("unicast to 10.77.0.3:3658", r == 9 && got && f.dst == PEER && f.dport == 3658 && f.sport == 3658, 0);
+    g_wsabuf[0] = 9; g_wsabuf[1] = GA(g_buf); g_iobytes = 0;
+    memset(g_overlapped, 0, sizeof g_overlapped);
+    r = WS("WSASendTo", 9, u3, GA(g_wsabuf), 1u, GA(&g_iobytes), 0u,
+           sa(g_sa, ipn(10, 77, 0, 3), 3658), 16u, GA(g_overlapped), 0u);
+    got = tx_take(&f);
+    check("WSASendTo reads Windows WSABUF length then pointer", r == 0 && g_iobytes == 9 && got && f.n == 9 && !memcmp(f.d, g_buf, 9) && g_overlapped[1] == 9, "r=%u", r);
+    rx_put(NET_KIND_LAN_UDP, PEER, ME, 3658, 3658, 0, 0, "reply", 5);
+    g_wsabuf[0] = 100; g_wsabuf[1] = GA(g_buf2); g_iobytes = 0; g_ioflags = 0;
+    memset(g_overlapped, 0, sizeof g_overlapped);
+    r = WS("WSARecvFrom", 9, u3, GA(g_wsabuf), 1u, GA(&g_iobytes), GA(&g_ioflags),
+           GA(g_sa2), lenp(16), GA(g_overlapped), 0u);
+    check("WSARecvFrom reads Windows WSABUF length then pointer", r == 0 && g_iobytes == 5 && !memcmp(g_buf2, "reply", 5) && sa_port(g_sa2) == 3658 && g_overlapped[1] == 5, "r=%u", r);
+    g_iobytes = 0; g_ioflags = 123;
+    r = WS("WSAGetOverlappedResult", 5, u3, GA(g_overlapped), GA(&g_iobytes), 1u, GA(&g_ioflags));
+    check("WSAGetOverlappedResult reads the OVERLAPPED argument", r == 1 && g_iobytes == 5 && g_ioflags == 0, "r=%u", r);
+    memset(g_overlapped, 0, sizeof g_overlapped); g_overlapped[4] = 1;
+    r = WS("WSARecvFrom", 9, u3, GA(g_wsabuf), 1u, GA(&g_iobytes), GA(&g_ioflags),
+           GA(g_sa2), lenp(16), GA(g_overlapped), 0u);
+    check("empty overlapped receive returns WSA_IO_PENDING", r == 0xffffffffu && err() == 997 && g_overlapped[0] == 0x103 && !test_event_signaled, "r=%u err=%u", r, err());
+    r = WS("WSAGetOverlappedResult", 5, u3, GA(g_overlapped), GA(&g_iobytes), 0u, GA(&g_ioflags));
+    check("pending overlapped result is incomplete", r == 0 && err() == 996, "r=%u err=%u", r, err());
+    rx_put(NET_KIND_LAN_UDP, PEER, ME, 3658, 3658, 0, 0, "later", 5);
+    uint32_t event = 1;
+    r = WS("WSAWaitForMultipleEvents", 5, 1u, GA(&event), 0u, 0u, 0u);
+    check("pending receive signals event on arrival", r == 0 && test_event_signaled && !memcmp(g_buf2, "later", 5), "r=%u", r);
+    r = WS("WSAGetOverlappedResult", 5, u3, GA(g_overlapped), GA(&g_iobytes), 0u, GA(&g_ioflags));
+    check("pending receive reports completed byte count", r == 1 && g_iobytes == 5 && sa_port(g_sa2) == 3658, "r=%u", r);
+    uint32_t uc = WS("socket", 3, 2u, 2u, 0u);
+    WS("bind", 3, uc, sa(g_sa, 0, 3659), 16u);
+    memset(g_overlapped, 0, sizeof g_overlapped); g_overlapped[4] = 1;
+    r = WS("WSARecvFrom", 9, uc, GA(g_wsabuf), 1u, GA(&g_iobytes), GA(&g_ioflags),
+           GA(g_sa2), lenp(16), GA(g_overlapped), 0u);
+    check("second socket receive is pending", r == 0xffffffffu && err() == 997, "r=%u", r);
+    WS("closesocket", 1, uc);
+    check("closing a socket cancels and signals pending receive", g_overlapped[0] == 995 && test_event_signaled, "status=%u", g_overlapped[0]);
     rx_put(NET_KIND_LAN_UDP, PEER, ME, 3658, 3658, 0, 0, "0123456789ABCDEF", 16);
     memset(g_buf2, 0, 64);
     r = WS("recvfrom", 6, u3, GA(g_buf2), 8u, 0u, GA(g_sa2), lenp(16));

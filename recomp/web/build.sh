@@ -144,6 +144,10 @@ $CC $TARGET $OPT $FEAT -o "$OUT/nfsu2.wasm" $OBJS \
   -Wl,--wrap=sub_005ea0d0 \
   -Wl,--wrap=sub_005f5b30 \
   -Wl,--wrap=sub_00519dd0 \
+  -Wl,--wrap=sub_0050e500 \
+  -Wl,--wrap=sub_0050f300 \
+  -Wl,--wrap=sub_004e0bd0 \
+  -Wl,--wrap=sub_004e3780 \
   -Wl,--import-memory,--export-memory,--shared-memory,--max-memory=4294967296 \
   -Wl,--initial-memory=$(( INITIAL_MB * 1048576 )),--global-base=$GUEST_END \
   -Wl,-z,stack-size=$(( 8 * 1048576 )) -Wl,--no-stack-first \

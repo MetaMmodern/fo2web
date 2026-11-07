@@ -715,7 +715,9 @@ static void sfinal(WsSock *s){                         /* last reference gone */
     if (s->aux_fd > 0) close(s->aux_fd);
     s->fd = -1; s->aux_fd = 0; s->used = 0; atomic_store(&s->closing, 0);
 }
+static void ov_cancel_socket(uint32_t h);
 static void sclose(WsSock *s, int abortive){
+    ov_cancel_socket(shandle(s));
     if (g_ws_mode == NET_VLAN) vlan_close(s, abortive);
 #ifndef __wasm__
     else if (s->fd >= 0 && s->type == 1 && abortive){
@@ -1490,6 +1492,131 @@ static uint32_t do_recv(CPU *c, int has_from){
     }
 }
 
+/* ---- WSARecvFrom / WSASendTo: the waitable/overlapped path --------------- */
+#include "win32_ext_events.h"
+#define OV_PENDING_STATUS 0x103u
+#define OV_IO_PENDING 997
+#define OV_IO_INCOMPLETE 996
+#define OV_ABORTED 995
+#define OV_MAX 128
+typedef struct { uint32_t h, pov, buf, len, from, fromlen; } PendingRecv;
+/* Guest calls and completion pumping run under the guest lock. */
+static PendingRecv ov_recv[OV_MAX];
+static void ov_complete(uint32_t pov, uint32_t bytes){
+    if (!pov || !gok(pov, 0x14)) return;
+    MR32(pov) = 0;                 /* Internal   */
+    MR32(pov + 4) = bytes;         /* InternalHigh */
+    uint32_t ev = MR32(pov + 0x10); /* hEvent */
+    if (ev) win32_event_set(ev);
+}
+static void ov_cancel_socket(uint32_t h){
+    for (int i = 0; i < OV_MAX; i++) if (ov_recv[i].pov && ov_recv[i].h == h){
+        uint32_t p = ov_recv[i].pov;
+        ov_recv[i].pov = 0;
+        if (gok(p, 0x14)){
+            MR32(p) = OV_ABORTED; MR32(p + 4) = 0;
+            if (MR32(p + 0x10)) win32_event_set(MR32(p + 0x10));
+        }
+    }
+}
+static int ov_queue_recv(uint32_t h, uint32_t pov, uint32_t buf, uint32_t len, uint32_t from, uint32_t fromlen){
+    if (!gok(pov, 0x14)) return WSAEFAULT;
+    for (int i = 0; i < OV_MAX; i++) if (ov_recv[i].pov == pov) return WSAEINVAL;
+    for (int i = 0; i < OV_MAX; i++) if (!ov_recv[i].pov){
+        ov_recv[i] = (PendingRecv){ h, pov, buf, len, from, fromlen };
+        MR32(pov) = OV_PENDING_STATUS; MR32(pov + 4) = 0;
+        if (MR32(pov + 0x10)) win32_event_reset(MR32(pov + 0x10));
+        return 0;
+    }
+    return WSAENOBUFS;
+}
+static void ov_pump(void){
+    for (int i = 0; i < OV_MAX; i++){
+        PendingRecv *p = &ov_recv[i];
+        if (!p->pov) continue;
+        WsSock *s = sget(p->h);
+        if (!s){ p->pov = 0; continue; }
+        uint32_t ip = 0; uint16_t port = 0; int got = 0;
+        int e = recv_one(s, g_mem + p->buf, (int)p->len, 0, &ip, &port, &got);
+        if (e == WSAEWOULDBLOCK) continue;
+        uint32_t pov = p->pov;
+        if ((!e || e == WSAEMSGSIZE) && p->from && s->type != 1) ga_out(p->from, p->fromlen, ip, port);
+        p->pov = 0;
+        if (!gok(pov, 0x14)) continue;
+        if (!e){ st_recv++; st_bytes_in += (uint64_t)got; ov_complete(pov, (uint32_t)got); }
+        else { MR32(pov) = (uint32_t)e; MR32(pov + 4) = (uint32_t)got;
+               if (MR32(pov + 0x10)) win32_event_set(MR32(pov + 0x10)); }
+    }
+}
+static uint32_t wsa_recvfrom(CPU *c){
+    if (need_startup()) return 0xFFFFFFFFu;
+    uint32_t h = A(c, 0), lb = A(c, 1), nbuf = A(c, 2), pbytes = A(c, 3),
+             pflags = A(c, 4), pfrom = A(c, 5), pfromlen = A(c, 6), pov = A(c, 7);
+    WsSock *s = sget(h); if (!s) FAIL(WSAENOTSOCK);
+    if (!nbuf || !gok(lb, 8)) FAIL(WSAEFAULT);
+    if (nbuf != 1){ static int said; if (!said++) ws_log("WSARecvFrom with %u buffers: only the first is used", nbuf); }
+    /* 32-bit WSABUF is ULONG len followed by CHAR *buf. */
+    int len = (int)MR32(lb); uint32_t buf = MR32(lb + 4);
+    if (len < 0 || (len && !gok(buf, (uint32_t)len))) FAIL(WSAEFAULT);
+    if (pfrom && (!pfromlen || !gok(pfromlen, 4) || (int32_t)MR32(pfromlen) < 16 || !gok(pfrom, 16))) FAIL(WSAEFAULT);
+    uint64_t dl = deadline_ms(s->rcvtimeo);
+    for (;;){
+        uint32_t ip = 0; uint16_t port = 0; int got = 0;
+        int e = recv_one(s, g_mem + buf, len, 0, &ip, &port, &got);
+        if (!e || e == WSAEMSGSIZE){
+            st_recv++; st_bytes_in += (uint64_t)got;
+            if (g_deny_strong && (got > 0 || s->type != 1)) deny_heard(ip);
+            if (pfrom && s->type != 1) ga_out(pfrom, pfromlen, ip, port);
+            if (pbytes) MR32(pbytes) = (uint32_t)got;
+            if (pflags) MR32(pflags) = 0;
+            ov_complete(pov, (uint32_t)got);
+            if (e) FAIL(e);
+            return 0;
+        }
+        if (e == WSAEWOULDBLOCK && pov){
+            int q = ov_queue_recv(h, pov, buf, (uint32_t)len, pfrom, pfromlen);
+            if (q) FAIL(q);
+            FAIL(OV_IO_PENDING);
+        }
+        if (e != WSAEWOULDBLOCK || s->nb) FAIL(e);
+        int w = swait(s, POLLIN, dl);
+        s = sget(h);
+        if (w == 2 || !s) FAIL(WSAEINTR);
+        if (w == 1) FAIL(WSAETIMEDOUT);
+    }
+}
+static uint32_t wsa_sendto(CPU *c){
+    if (need_startup()) return 0xFFFFFFFFu;
+    uint32_t h = A(c, 0), lb = A(c, 1), nbuf = A(c, 2), pbytes = A(c, 3),
+             to = A(c, 5), tolen = A(c, 6), pov = A(c, 7);
+    WsSock *s = sget(h); if (!s) FAIL(WSAENOTSOCK);
+    if (!nbuf || !gok(lb, 8)) FAIL(WSAEFAULT);
+    if (nbuf != 1){ static int said; if (!said++) ws_log("WSASendTo with %u buffers: only the first is used", nbuf); }
+    int len = (int)MR32(lb); uint32_t buf = MR32(lb + 4);
+    if (len < 0 || (len && !gok(buf, (uint32_t)len))) FAIL(WSAEFAULT);
+    uint32_t ip = 0; uint16_t port = 0;
+    if (to && s->type != 1){ int e = ga_in(to, tolen, &ip, &port); if (e) FAIL(e); }
+    int total = 0;
+    uint64_t dl = deadline_ms(s->sndtimeo);
+    for (;;){
+        int sent = 0;
+        int e = send_one(s, g_mem + buf + total, len - total, 0, ip, port, to && s->type != 1, &sent, c);
+        if (!e){
+            total += sent; st_sent++; st_bytes_out += (uint64_t)sent;
+            if (s->type != 1 || total >= len || s->nb) break;
+            continue;
+        }
+        if (e != WSAEWOULDBLOCK || s->nb){ if (total) break; FAIL(e); }
+        int w = swait(s, POLLOUT, dl);
+        s = sget(h);
+        if (w == 2 || !s) FAIL(WSAEINTR);
+        if (w == 1){ if (total) break; FAIL(WSAETIMEDOUT); }
+    }
+    if (pbytes) MR32(pbytes) = (uint32_t)total;
+    ov_complete(pov, (uint32_t)total);
+    return 0;
+}
+
 static uint32_t ws_shutdown(CPU *c){
     if (need_startup()) return 0xFFFFFFFFu;
     WsSock *s = sget(A(c, 0)); if (!s) FAIL(WSAENOTSOCK);
@@ -1927,8 +2054,12 @@ static uint32_t ws_gethostbyname(CPU *c){
      * OpenSpy servers. Preserve which one the game asked for; one gateway IP
      * for all *.openspy.net hosts cannot distinguish them by port. */
     if (g_ws_mode == NET_VLAN && !env_off(getenv("FO2_OPENSPY"))){
-        uint8_t nat = !strcasecmp(name, "natneg1.openspy.net") ? 1 :
-                      !strcasecmp(name, "natneg2.openspy.net") ? 2 : 0;
+        /* Any NAT-negotiation host resolves to its own gateway VIP: the game
+         * asks for natneg1/natneg2, but a bare "natneg" (or another suffix)
+         * must not fall through to the plain relay address, where the gateway
+         * has no 27901 route and the negotiation dies. */
+        uint8_t nat = 0;
+        if (strstr(name, "natneg")) nat = strchr(name, '2') ? 2 : 1;
         if (nat){
             ips[0] = mkip(10, 77, 31, nat == 1 ? 254 : 253);
             return make_hostent(c, name, ips, 1);
@@ -1942,8 +2073,12 @@ static uint32_t ws_gethostbyname(CPU *c){
         size_t n = strlen(name);
         if (n == 11 ? !strcasecmp(name, "openspy.net")
                     : (n > 12 && !strcasecmp(name + n - 12, ".openspy.net"))){
-            static int said;
-            if (!said++) ws_log("openspy: *.openspy.net is the server's relay 10.77.0.1");
+            /* name each distinct host once: the join's 27900/27901 traffic
+             * tells us which service the game expects on the relay address */
+            static char said[8][64]; static int ns;
+            int k; for (k = 0; k < ns && strcasecmp(said[k], name); k++) {}
+            if (k == ns && ns < 8){ snprintf(said[ns++], sizeof said[0], "%s", name);
+                ws_log("openspy: %s is the server's relay 10.77.0.1", name); }
             ips[0] = mkip(10, 77, 0, 1); return make_hostent(c, name, ips, 1);
         }
     }
@@ -2092,6 +2227,48 @@ int winsock_call(CPU *c, const char *dll, const char *n, uint32_t *out){
         else if (!strcmp(n, "WSAStartup")) r = ws_startup(c);
         else if (!strcmp(n, "WSACleanup")) r = ws_cleanup();
         else if (!strcmp(n, "WSAIoctl")) r = ws_wsaioctl(c);
+        else if (!strcmp(n, "WSACreateEvent")){ r = win32_event_new(); if (!r) FAIL(WSAENOBUFS); }
+        else if (!strcmp(n, "WSACloseEvent")) r = win32_event_close(A(c, 0));
+        else if (!strcmp(n, "WSASetEvent")) r = win32_event_set(A(c, 0));
+        else if (!strcmp(n, "WSAResetEvent")) r = win32_event_reset(A(c, 0));
+        else if (!strcmp(n, "WSASendTo")) r = wsa_sendto(c);
+        else if (!strcmp(n, "WSARecvFrom")) r = wsa_recvfrom(c);
+        else if (!strcmp(n, "WSAWaitForMultipleEvents")){
+            uint32_t cnt = A(c, 0), parr = A(c, 1), all = A(c, 2), ms = A(c, 3);
+            if (!cnt || cnt > 64 || !gok(parr, 4u * cnt)) FAIL(WSAEINVAL);
+            uint32_t hs[64];
+            for (uint32_t i = 0; i < cnt; i++) hs[i] = MR32(parr + 4u * i);
+            uint64_t end = ms == 0xFFFFFFFFu ? 0 : ws_now_us() + (uint64_t)ms * 1000u;
+            int k;
+            for (;;){
+                ov_pump();
+                k = win32_event_wait(hs, (int)cnt, all != 0, 0);
+                if (k >= 0 || (ms != 0xFFFFFFFFu && ws_now_us() >= end)) break;
+                /* Pending receives need periodic pumping; never retain the
+                 * guest lock while waiting for another thread or the LAN. */
+                guest_wait_begin();
+                struct timespec pause = {0, 1000000L}; nanosleep(&pause, 0);
+                guest_wait_end();
+            }
+            r = k < 0 ? 0x102u /* WSA_WAIT_TIMEOUT */ : (uint32_t)k;   /* WSA_WAIT_EVENT_0 + k */
+        }
+        else if (!strcmp(n, "WSAGetOverlappedResult")){
+            uint32_t pov = A(c, 1), pf = A(c, 4);
+            if (!gok(pov, 0x14)){ set_err(WSAEINVAL); r = 0; break; }
+            if (!A(c, 2) || !gok(A(c, 2), 4) || (pf && !gok(pf, 4))){ set_err(WSAEFAULT); r = 0; break; }
+            ov_pump();
+            while (MR32(pov) == OV_PENDING_STATUS && A(c, 3)){
+                guest_wait_begin();
+                struct timespec pause = {0, 1000000L}; nanosleep(&pause, 0);
+                guest_wait_end();
+                ov_pump();
+            }
+            if (MR32(pov) == OV_PENDING_STATUS){ set_err(OV_IO_INCOMPLETE); r = 0; break; }
+            if (MR32(pov)){ set_err((int)MR32(pov)); r = 0; break; }
+            if (pf) MR32(pf) = 0;
+            MR32(A(c, 2)) = MR32(pov + 4);
+            r = 1;
+        }
         else return 0;
         break;
     case 'h': case 'n':

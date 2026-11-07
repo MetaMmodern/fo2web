@@ -12,7 +12,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const WASI = fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
+const WASI = process.env.WASI || [path.join(REPO, 'deps'), path.join(REPO, '../deps')]
+  .filter(d => fs.existsSync(d))
+  .flatMap(d => fs.readdirSync(d).filter(n => n.startsWith('wasi-sdk-')).map(n => path.join(d, n)))
+  .sort().pop();
 const CC = WASI && path.join(WASI, 'bin/clang');
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 // web/build.sh's target, features and defines

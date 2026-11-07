@@ -197,6 +197,18 @@ uint64_t host_us(void){
     uint64_t base = atomic_load(&g_vclock_base);
     uint64_t rb   = atomic_load(&g_real_base);
     uint64_t now  = real_us();
+#ifdef FLATOUT2
+    /* FlatOut's first QPC can arrive before the first Present/vclock_tick.
+     * Without an anchor g_real_base is 0 and (now - 0) below would hand the
+     * guest the whole host monotonic epoch (see the .wgpuc QPC words
+     * 0065fad6:d6fe5e36).  Anchor once, atomically, to this first sample so
+     * the guest clock starts relative and small. */
+    if (__builtin_expect(rb == 0, 0)){
+        uint64_t expected = 0;
+        atomic_compare_exchange_strong(&g_real_base, &expected, now);
+        rb = atomic_load(&g_real_base);
+    }
+#endif
     uint64_t d    = (now > rb) ? (now - rb) : 0ull;
     /* Cap on the advance WITHIN a frame.  16 ms was FAR TOO TIGHT: code that
      * waits more than 16 ms of GAME time in one frame (the pre-race cut
@@ -242,6 +254,66 @@ uint64_t host_us(void){
 }
 uint32_t host_ms(void){ return (uint32_t)(host_us() / 1000ull) + 1000u; }
 uint64_t host_qpc(void){ return host_us(); }
+#ifdef FLATOUT2
+/* FlatOut's startup wait (QPC return 0x54ca83) spins for up to 5 s before
+ * the first Present.  host_us() deliberately caps progress between frames,
+ * so that wait could never finish; its eventual jump also made the next
+ * QPC/timeGetTime/vclock_tick see a discontinuous timeline.
+ *
+ * Advance the ONE shared virtual clock by the uncapped real elapsed time and
+ * commit the result as the new frame base.  The extra time therefore remains
+ * visible to every later clock read and to vclock_tick, instead of being a
+ * one-off value that vanished on the next call.  Normal per-frame pacing is
+ * untouched once the renderer starts presenting.
+ *
+ * Called from win32_call's QPC path with the guest lock held; mutation uses
+ * the same atomics as host_us/vclock_tick (a vclock_tick cannot interleave
+ * inside this guest-lock-held call). */
+static uint64_t fo2_startup_qpc(void){
+    { uint64_t fz = atomic_load(&g_vclock_freeze); if (fz) return fz; }
+    /* host_us first: on the very first query it anchors g_real_base to the
+     * monotonic source, and it folds any pending creep into `current`. */
+    uint64_t current = host_us();
+    uint64_t now     = real_us();                 /* coherent sample AFTER host_us */
+    uint64_t rb      = atomic_load(&g_real_base);
+    uint64_t vb      = atomic_load(&g_vclock_base);
+    uint64_t elapsed = (rb && now > rb) ? (now - rb) : 0ull;
+    uint64_t cand    = vb + elapsed;
+    uint64_t v       = cand > current ? cand : current;
+    atomic_store(&g_vclock_base, v);
+    atomic_store(&g_real_base, now);
+    atomic_exchange(&g_vclock_creep, 0ull);       /* folded into current/v */
+    atomic_store(&g_vclock_polls, 0);
+    return v;
+}
+#endif
+/* A blocking guest wait (Sleep/SleepEx) really consumes wall time.  Between
+ * Presents host_us() caps progress, so a wait loop that polls the clock while
+ * sleeping (FlatOut's 5 s boot wait, 0x521444: Sleep(100) + QPC) never sees
+ * its deadline and the boot hangs forever; the old epoch leak only masked
+ * this by making the first sample enormous.  Commit the real time the wait
+ * consumed to the shared virtual clock, as Windows would report it, so the
+ * timeline stays honest and monotonic.  Normal frame pacing is unchanged,
+ * and an oracle freeze stays frozen. */
+void vclock_advance_wait(void){
+#ifdef FLATOUT2
+    if (atomic_load(&g_vclock_freeze)) return;
+    uint64_t rb = atomic_load(&g_real_base);
+    uint64_t now = real_us();
+    if (!rb){
+        uint64_t expected = 0;
+        atomic_compare_exchange_strong(&g_real_base, &expected, now);
+        return;
+    }
+    if (now <= rb) return;
+    uint64_t add = now - rb;
+    uint64_t cr  = atomic_exchange(&g_vclock_creep, 0ull);
+    atomic_fetch_add(&g_vclock_base, add + cr);
+    atomic_store(&g_real_base, now);
+    atomic_store(&g_vclock_polls, 0);
+#endif
+}
+/* ---- end HYBRID virtual clock ----------------------------------------- */
 
 uint32_t win32_block_size(uint32_t u){ return gheap_usize(u); }
 /* guest address space the heap has reserved (the bump pointer with
@@ -551,21 +623,26 @@ int win32_call(CPU *c, uint32_t idx){
              || (idx >= g_imp_count && !strcmp(n,"QueryPerformanceCounter"))){
         if (ENVC("QPCWHO")) qpc_who(c);
         if (c->eip == 0x43bdfeu) qpc_spin_sleep(c);
-        uint64_t v = host_qpc();
+        uint64_t v;
+#ifdef FLATOUT2
         /* FlatOut's first-frame bootstrap waits up to 5 s in
          * sub_00521444 -> sub_0054ca20 (QPC return 0x54ca83). The ordinary
          * game clock intentionally caps progress between Presents; that
          * freezes this one startup wait after 50 ms because the next Present
-         * is the very thing the wait is holding up. Use uncapped elapsed real
-         * time at this callsite until the renderer has produced two frames. */
+         * is the very thing the wait is holding up. Use the shared uncapped
+         * startup clock at this callsite until the renderer has produced two
+         * frames; the helper commits its progress, so later QPCs and
+         * timeGetTime stay on the same timeline. */
         if (c->eip == 0x0054ca83u){
             long metal_frames(void);
             if (metal_frames() < 2){
-                uint64_t rb=atomic_load(&g_real_base), vb=atomic_load(&g_vclock_base), now=real_us();
-                v=vb+(now>rb ? now-rb : 0u);
-                static unsigned note; if(!note++){ fprintf(stderr,"[fo2-clock] uncapped startup QPC wait enabled\\n"); }
-            }
-        }
+                v = fo2_startup_qpc();
+                static unsigned note; if(!note++){ fprintf(stderr,"[fo2-clock] uncapped startup QPC wait enabled\n"); }
+            } else v = host_qpc();
+        } else v = host_qpc();
+#else
+        v = host_qpc();
+#endif
         uint32_t p=ARG(c,0);
         if(p){ MR32(p)=(uint32_t)v; MR32(p+4)=(uint32_t)(v>>32); } r=1; }
     /* A lifted DLL's own heaps (server.dll's CRT: HeapCreate from that DLL)

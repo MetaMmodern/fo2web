@@ -6,8 +6,11 @@
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 void __real_sub_005e9350(CPU *c);
+void __real_sub_0050e500(CPU *c);
+void __real_sub_0050f300(CPU *c);
 void __real_sub_005e89b0(CPU *c);
 void __real_sub_005ea310(CPU *c);
 void __real_sub_005e9330(CPU *c);
@@ -21,6 +24,8 @@ void __real_sub_0045fc90(CPU *c);
 void watch_arm(uint32_t);
 void watch_dump(const char *, int);
 void __real_sub_00519dd0(CPU *c);
+void __real_sub_004e0bd0(CPU *c);
+void __real_sub_004e3780(CPU *c);
 
 static int enabled(void){
     static int on = -1;
@@ -439,4 +444,158 @@ void __wrap_sub_00519dd0(CPU *c){
         return;
     }
     __real_sub_00519dd0(c);
+}
+
+/* Main-network race clock catch-up probes (FO2_SPY_DBG only): 0050e500 drives
+ * the race update and passes a target time to 0050f300, which advances the
+ * object's last-report clock at +0x24c8 in 500 ms steps. Record the gap at
+ * entry and the host time spent, without touching guest registers or flags.
+ * Watchdog evidence from a fresher log: main EIP 50f9d7, whose caller chain
+ * includes 50e655; those snapshots are only leads, not proof of the root. */
+static uint64_t spy_mono_ns(void){
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int spy_gap_over_5000(uint32_t target, uint32_t last, int64_t *gap){
+    if (target == 0xffffffffu || last == 0xffffffffu) return 0;
+    *gap = (int64_t)(int32_t)target - (int64_t)(int32_t)last;
+    return *gap > 5000;
+}
+
+void __wrap_sub_0050e500(CPU *c){
+    if (!enabled()){ __real_sub_0050e500(c); return; }
+    uint32_t obj = readable_field(c->esp, 4u);
+    uint32_t target = readable_field(c->esp, 8u);
+    uint32_t last = readable_field(obj, 0x24c8u);
+    uint32_t stored = readable_field(obj, 0x24ccu);
+    uint32_t frame = readable_field(obj, 0x24d8u);
+    uint32_t active_raw = readable_field(obj, 0x24d0u);
+    int active = active_raw != 0xffffffffu && (active_raw & 0xffu) != 0;
+    int64_t gap = 0;
+    int large = spy_gap_over_5000(target, last, &gap);
+    static unsigned active_calls, large_logged;
+    static int have_prev;
+    static uint32_t prev_target, prev_last;
+    int changed = !have_prev || target != prev_target || last != prev_last;
+    if (large && changed && large_logged < 8){
+        large_logged++;
+        fprintf(stderr, "[spy-race] e500 large obj=%08x target=%08x last=%08x gap=%lld stored=%08x frame=%08x active=%d\n",
+                obj, target, last, (long long)gap, stored, frame, active);
+    }
+    if (active && active_calls < 4){
+        active_calls++;
+        fprintf(stderr, "[spy-race] e500 active obj=%08x target=%08x last=%08x gap=%lld stored=%08x frame=%08x\n",
+                obj, target, last, (long long)gap, stored, frame);
+    }
+    prev_target = target; prev_last = last; have_prev = 1;
+    uint64_t t0 = spy_mono_ns();
+    __real_sub_0050e500(c);
+    uint64_t t1 = spy_mono_ns();
+    uint32_t after = readable_field(obj, 0x24c8u);
+    if (t0 && t1 && t1 >= t0 && t1 - t0 >= 100000000ull){
+        static unsigned slow;
+        if (slow < 8){
+            slow++;
+            fprintf(stderr, "[spy-race] e500 slow ms=%llu obj=%08x target=%08x last=%08x after=%08x\n",
+                    (unsigned long long)((t1 - t0) / 1000000ull), obj, target, last, after);
+        }
+    }
+}
+
+void __wrap_sub_0050f300(CPU *c){
+    if (!enabled()){ __real_sub_0050f300(c); return; }
+    uint32_t obj = c->esi;
+    uint32_t target = readable_field(c->esp, 4u);
+    uint32_t last = readable_field(obj, 0x24c8u);
+    int64_t gap = 0;
+    int large = spy_gap_over_5000(target, last, &gap);
+    static unsigned calls, large_logged;
+    static int have_prev;
+    static uint32_t prev_target, prev_last;
+    int changed = !have_prev || target != prev_target || last != prev_last;
+    if (calls < 4){
+        calls++;
+        fprintf(stderr, "[spy-race] f300 obj=%08x target=%08x last=%08x gap=%lld\n",
+                obj, target, last, (long long)gap);
+    }
+    if (large && changed && large_logged < 8){
+        large_logged++;
+        fprintf(stderr, "[spy-race] f300 large obj=%08x target=%08x last=%08x gap=%lld\n",
+                obj, target, last, (long long)gap);
+    }
+    prev_target = target; prev_last = last; have_prev = 1;
+    uint64_t t0 = spy_mono_ns();
+    __real_sub_0050f300(c);
+    uint64_t t1 = spy_mono_ns();
+    uint32_t after = readable_field(obj, 0x24c8u);
+    if (t0 && t1 && t1 >= t0 && t1 - t0 >= 100000000ull){
+        static unsigned slow;
+        if (slow < 8){
+            slow++;
+            fprintf(stderr, "[spy-race] f300 slow ms=%llu obj=%08x target=%08x last=%08x after=%08x\n",
+                    (unsigned long long)((t1 - t0) / 1000000ull), obj, target, last, after);
+        }
+    }
+}
+
+/* Origin probe for the caught-up race clock (FO2_SPY_DBG only). 004e0bd0 is
+ * the network clock update: cdecl gameobj at esp+4, packet at esp+8. It reads
+ * the packet timestamp at packet+2, subtracts the local extrapolated time
+ * (global 0x8dcc74) plus the accumulated network time (0x8dcb00), and stores
+ * the result in gameobj+0x2087c. Log the first four calls only, before and
+ * after the original, without touching any guest state. */
+void __wrap_sub_004e0bd0(CPU *c){
+    if (!enabled()){ __real_sub_004e0bd0(c); return; }
+    static unsigned calls;
+    int log = calls++ < 4;
+    uint32_t gameobj = readable_field(c->esp, 4u);
+    uint32_t packet = readable_field(c->esp, 8u);
+    uint32_t timestamp = readable_field(packet, 2u);
+    if (log)
+        fprintf(stderr, "[spy-clock] start obj=%08x packet=%08x ts=%08x net=%08x extrap=%08x race=%08x\n",
+                gameobj, packet, timestamp, readable32(0x8dcb00u),
+                readable32(0x8dcc74u), readable_field(gameobj, 0x2087cu));
+    __real_sub_004e0bd0(c);
+    if (log)
+        fprintf(stderr, "[spy-clock] start after obj=%08x packet=%08x ts=%08x net=%08x extrap=%08x race=%08x\n",
+                gameobj, packet, timestamp, readable32(0x8dcb00u),
+                readable32(0x8dcc74u), readable_field(gameobj, 0x2087cu));
+}
+
+/* Origin probe for the timer accumulator (FO2_SPY_DBG only). 004e3780 takes
+ * the timer object in ESI; the network clock normally uses 0x8dcab8. It adds
+ * the measured interval to +0x48, derives the extrapolation at +0x1bc from
+ * the base at +0x1b8 and scale at +0x1c0, and keeps its embedded timer at
+ * +0x20 (accumulator +0x38, last delta +0x3c, QPC low/high +0x28/+0x2c).
+ * Log the first four updates and, separately, up to four updates whose
+ * accumulator jumps by more than 5000 (modular 32-bit difference). */
+void __wrap_sub_004e3780(CPU *c){
+    if (!enabled()){ __real_sub_004e3780(c); return; }
+    uint32_t obj = c->esi;
+    if (obj != 0x8dcab8u){ __real_sub_004e3780(c); return; }
+    static unsigned calls, large_logged;
+    int first = calls++ < 4;
+    uint32_t before_accum = readable_field(obj, 0x48u);
+    uint32_t before_extrap = readable_field(obj, 0x1bcu);
+    uint32_t before_base = readable_field(obj, 0x1b8u);
+    uint32_t before_scale = readable_field(obj, 0x1c0u);
+    __real_sub_004e3780(c);
+    uint32_t after_accum = readable_field(obj, 0x48u);
+    int32_t accum_delta = (int32_t)(after_accum - before_accum);
+    int large = accum_delta > 5000 || accum_delta < -5000;
+    int log_large = 0;
+    if (!first && large && large_logged < 4){ large_logged++; log_large = 1; }
+    if (first || log_large)
+        fprintf(stderr, "[spy-clock] update obj=%08x first=%d large=%d accum=%08x->%08x delta=%d "
+                "extrap=%08x->%08x base=%08x->%08x scale=%08x->%08x "
+                "timer_accum=%08x lastdelta=%08x qpc=%08x:%08x freq=%08x:%08x\n",
+                obj, first, large, before_accum, after_accum, accum_delta,
+                before_extrap, readable_field(obj, 0x1bcu),
+                before_base, readable_field(obj, 0x1b8u),
+                before_scale, readable_field(obj, 0x1c0u),
+                readable_field(obj, 0x38u), readable_field(obj, 0x3cu),
+                readable_field(obj, 0x28u), readable_field(obj, 0x2cu),
+                readable32(0x8da710u), readable32(0x8da714u));
 }

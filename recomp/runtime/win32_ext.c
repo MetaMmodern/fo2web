@@ -14,6 +14,7 @@
 
 void dispatch_indirect(CPU*,uint32_t);
 void mem_commit(uint32_t,uint32_t);
+void vclock_advance_wait(void);   /* win32.c: a sleep really consumes guest time */
 uint32_t win32_alloc(uint32_t n, int zero);
 uint32_t res_find(uint32_t,uint32_t,int);
 uint32_t res_data(uint32_t);
@@ -787,6 +788,52 @@ static uint32_t obj_new(ObKind k){
     }
     return H_BASE + (uint32_t)i;
 }
+/* ---- WSAEVENT: the Winsock waitable-event API (winsock.c) ---------------
+ * WS2_32's event object is the same kernel event the game already uses
+ * through CreateEventA; the race client creates one, puts it in an
+ * OVERLAPPED and waits on it, so these share the object table. */
+static Obj *obj_get(uint32_t h);
+static void obj_close(uint32_t h);
+uint32_t win32_event_new(void){
+    uint32_t h = obj_new(OB_EVENT);
+    Obj *o = obj_get(h);
+    if (o){ o->manual = 1; o->signaled = 0; }
+    return h;
+}
+int win32_event_set(uint32_t h){
+    Obj *o = obj_get(h); if (!o) return 0;
+    pthread_mutex_lock(&o->mtx); o->signaled = 1;
+    pthread_cond_broadcast(&o->cv); pthread_mutex_unlock(&o->mtx);
+    return 1;
+}
+int win32_event_reset(uint32_t h){
+    Obj *o = obj_get(h); if (!o) return 0;
+    pthread_mutex_lock(&o->mtx); o->signaled = 0; pthread_mutex_unlock(&o->mtx);
+    return 1;
+}
+int win32_event_close(uint32_t h){ obj_close(h); return 1; }
+/* index of the first signalled event, or -1 on timeout. wait_all waits for
+ * every one; ms is the timeout in milliseconds (INFINITE = 0xFFFFFFFF). */
+int win32_event_wait(const uint32_t *hs, int n, int wait_all, uint32_t ms){
+    uint64_t end = ms == 0xFFFFFFFFu ? 0 : gil_now_us() / 1000ull + (uint64_t)ms;
+    for (;;){
+        int all = 1, first = -1;
+        for (int i = 0; i < n; i++){
+            Obj *o = obj_get(hs[i]);
+            int sig = 0;
+            if (o){ pthread_mutex_lock(&o->mtx); sig = o->signaled;
+                    if (sig && !o->manual) o->signaled = 0;
+                    pthread_mutex_unlock(&o->mtx); }
+            if (sig && first < 0) first = i;
+            if (!sig) all = 0;
+        }
+        if (wait_all ? all : first >= 0) return wait_all ? 0 : first;
+        if (ms != 0xFFFFFFFFu && gil_now_us() / 1000ull >= end) return -1;
+        struct timespec ts = {0, 1000000L};
+        nanosleep(&ts, 0);
+    }
+}
+
 /* CloseHandle / RegCloseKey: free the slot when the last handle is closed */
 static void obj_close(uint32_t h){
     if (h < H_BASE || h >= H_BASE+OBJ_MAX) return;
@@ -1701,6 +1748,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
           if(!ms){ ts.tv_nsec = 200000L; }        /* Sleep(0): just yield */
           nanosleep(&ts,0); }
         guest_yield_end();
+        vclock_advance_wait();                    /* the slept time really passed */
         r=0; }
     else if (!strcmp(n,"SleepEx")){
         uint32_t ms=A(c,0);
@@ -1710,6 +1758,7 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
           if(!ms) ts.tv_nsec = 200000L;
           nanosleep(&ts,0); }
         guest_yield_end();
+        vclock_advance_wait();
         r=0; }
     else if (!strcmp(n,"WaitForMultipleObjects")){
         uint32_t cnt=A(c,0), parr=A(c,1), waitall=A(c,2), ms=A(c,3);
