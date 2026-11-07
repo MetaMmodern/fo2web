@@ -75,11 +75,13 @@ impl StreamQueue {
 }
 
 impl LanSwitch {
-    /// The last two addresses of the 10.77.0.0/19 switch subnet are reserved
-    /// for FlatOut's two OpenSpy NAT-negotiation UDP hosts, not handed to peers.
+    /// The last few addresses of the 10.77.0.0/19 switch subnet are reserved
+    /// for FlatOut's two OpenSpy NAT-negotiation UDP hosts and the relay's
+    /// hosted-peer identity, not handed to peers.
     fn is_online_destination(&self, dst: u32) -> bool {
         self.online_vip == Some(dst)
-            || (self.online_vip == Some(0x0a4d_0001) && (dst == 0x0a4d_1ffe || dst == 0x0a4d_1ffd))
+            || (self.online_vip == Some(0x0a4d_0001)
+                && (dst == 0x0a4d_1ffe || dst == 0x0a4d_1ffd || dst == 0x0a4d_1ff0))
     }
     /// One frame, to each of `dsts` in turn (the frame's own destination, or a bundle entry's list): from peer to the
     /// browsers each reaches, the free-roam hub or the Online host, within peer's budgets.  False: over them (what
@@ -435,6 +437,50 @@ pub(crate) mod tests {
         f[0] = kind;
         f[8..12].copy_from_slice(&dst.to_be_bytes());
         Bytes::from(f)
+    }
+
+    /// A frame to any of the relay's reserved VIPs reaches the Online host —
+    /// the two NAT-negotiation hosts and the hosted-peer identity — while a
+    /// plain peer address does not.
+    #[tokio::test]
+    async fn the_relay_vips_route_to_the_online_host() {
+        use nfsu2_util::Host;
+        struct H(std::sync::Arc<std::sync::Mutex<Vec<u32>>>);
+        impl Host for H {
+            fn vip(&self) -> u32 { 0x0a4d_0001 }
+            fn name(&self) -> &str { "online" }
+            fn listed(&self) -> bool { true }
+            fn frame(&self, from: u32, _data: Bytes, _ctx: FrameCtx) {
+                self.0.lock().unwrap().push(from);
+            }
+            fn peer_gone(&self, _vip: u32) {}
+            fn info(&self) -> tokio::sync::oneshot::Receiver<serde_json::Value> {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(serde_json::json!({}));
+                rx
+            }
+            fn vips(&self) -> tokio::sync::oneshot::Receiver<std::collections::HashSet<u32>> {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = tx.send(std::collections::HashSet::new());
+                rx
+            }
+            fn stop(&self) {}
+        }
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let online: std::sync::Arc<dyn Host> = std::sync::Arc::new(H(got.clone()));
+        let sw = std::sync::Arc::new(LanSwitch::new(LanOptions::default(), "", Some(online), None, None, None));
+        let (_, _, p) = peer(&sw, "host");
+        for (vip, want) in [
+            (0x0a4d_1ffeu32, true),
+            (0x0a4d_1ffdu32, true),
+            (0x0a4d_1ff0u32, true),
+            (0x0a4d_0010u32, false),
+        ] {
+            let before = got.lock().unwrap().len();
+            sw.route(&p, &frame(KIND_LAN_UDP, vip), std::iter::once(vip));
+            let after = got.lock().unwrap().len();
+            assert_eq!(after > before, want, "vip {vip:08x}");
+        }
     }
 
     /// The buckets charged once for a bundle entry's destinations come to what charging them one destination after

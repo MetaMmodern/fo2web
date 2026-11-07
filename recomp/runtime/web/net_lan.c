@@ -117,19 +117,10 @@ static int is_loop_n(uint32_t n){ return ((const uint8_t *)&n)[0] == 127; }
 static uint32_t own_n(void){ return H(g_vip); }
 static int online(void){ return MB && ld(&MB->page_state) == NET_PAGE_ONLINE && ld(&MB->vip) == g_vip; }
 static int in_subnet_h(uint32_t h){ return g_mask && (h & g_mask) == (g_vip & g_mask); }
-#ifdef FLATOUT2
-/* Never turn the OpenSpy UDP relay into a route to localhost, private services,
- * multicast or reserved addresses. The server applies this check independently. */
-static int public_ip_h(uint32_t h){
-    unsigned a = h >> 24, b = (h >> 16) & 255, c = (h >> 8) & 255;
-    return a && a != 10 && a != 127 && a < 224 &&
-           !(a == 100 && b >= 64 && b <= 127) && !(a == 169 && b == 254) &&
-           !(a == 172 && b >= 16 && b <= 31) &&
-           !(a == 192 && (b == 0 || b == 168 || (b == 88 && c == 99))) &&
-           !(a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100))) &&
-           !(a == 203 && b == 0 && c == 113);
-}
-#endif
+/* The OpenSpy gateway's destinations are validated by the server: public
+ * peers and players who joined a session this browser hosts. The page must not
+ * decide that alone, because a hosted player's join packet can carry a private
+ * LAN address that the host then answers. */
 static int bcast_h(uint32_t h){ return h == 0xFFFFFFFFu || (g_mask && h == ((g_vip & g_mask) | ~g_mask)); }
 static int peer_present_h(uint32_t h){
     if (!MB || !in_subnet_h(h)) return 0;
@@ -999,14 +990,17 @@ int vlan_sendto(WsSock *s, const uint8_t *buf, int len, uint32_t ip, uint16_t po
         if (port == RACE_PORT || v->bport == RACE_PORT) race_note(ip_h, 0);
     } else {
 #ifdef FLATOUT2
-        /* The switch only knows its virtual LAN. Send a public UDP destination
+        /* The switch only knows its virtual LAN. Send any other UDP destination
          * to the OpenSpy gateway, carrying the original IPv4 in the unused
-         * datagram connection-id field. Replies retain the public source IP. */
+         * datagram connection-id field. The server decides what may be reached:
+         * a public peer, or a player who joined a session this browser hosts
+         * (whose own join packet may carry a private LAN address). Anything
+         * else is dropped there, so the page no longer needs to guess. */
         static int spy_on = -1;
         if (spy_on < 0){ const char *e = getenv("FO2_OPENSPY"); spy_on = !e || strcmp(e, "0"); }
-        if (spy_on && port && public_ip_h(ip_h)){
+        if (spy_on && port){
             { static unsigned shown; if (shown++ < 16)
-                ws_log("virtual LAN: datagram to public %s:%u sent through the OpenSpy gateway", ipn(ip, b), port); }
+                ws_log("virtual LAN: datagram to %s:%u sent through the OpenSpy gateway", ipn(ip, b), port); }
             if (tx(NET_KIND_LAN_UDP, 0x0a4d0001u, v->bport, port, NET_LAN_UDP_DATA,
                    (uint8_t)s->ip_ttl, ip_h, buf, (uint32_t)len)) sent_note(v, ip, port);
             pthread_mutex_unlock(&g_mu);
