@@ -13,12 +13,13 @@
 # with duplicate or missing sub_X, or silently drops hooks).
 set -e -o pipefail
 cd "$(dirname "$0")/.."
-# overrides.c is the NFS patch set; FlatOut uses fo2_compat.c instead (the two
-# define the same overrides_report/g_fe_mgr, so only one may be compiled).  Its
-# guest overrides must stay ordinary lifted functions, not sub_X_orig.
+# overrides.c and netrace.c are the NFS patch set; FlatOut uses fo2_compat.c and
+# its own modules instead.  Their guest overrides must stay ordinary lifted
+# functions (FlatOut's own code), not sub_X_orig, or NFS logic runs at FlatOut
+# addresses on a network race.
 overrides(){
   local srcs
-  srcs=$(ls runtime/*.c runtime/*.m | grep -vE '/overrides\.c$')
+  srcs=$(ls runtime/*.c runtime/*.m | grep -vE '/(overrides|netrace)\.c$')
   { { grep -ohE 'sub_00[0-9a-f]{6}_orig' $srcs || true; } | sed -E 's/sub_00([0-9a-f]{6})_orig/\1/';
     { grep -ohE '^DX_WRAP\([A-Z0-9_]+, *00[0-9a-f]{6}\)' runtime/d3dx_hle.c || true; } | sed -E 's/.*00([0-9a-f]{6})\)/\1/'; } | sort -u | paste -sd, -
 }

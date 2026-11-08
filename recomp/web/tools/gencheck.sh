@@ -22,7 +22,7 @@ G="${GEN:-gen}"
 # its functions un-renamed (see genstamp.sh), so its sub_X_orig are not expected.
 # A sub_X_orig whose un-renamed sub_X is also absent from decls.h names an
 # address outside .text (a data-section override the lifter cannot emit): skip it.
-SRCS=$(ls runtime/*.c runtime/*.m | grep -vE '/overrides\.c$')
+SRCS=$(ls runtime/*.c runtime/*.m | grep -vE '/(overrides|netrace)\.c$')
 STALE=$(grep -ohE 'sub_00[0-9a-f]{6}_orig' $SRCS | sort -u | while read -r f; do
   grep -q "void $f(" "$G/all/decls.h" && continue
   grep -q "void ${f%_orig}(" "$G/all/decls.h" || continue

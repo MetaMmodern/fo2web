@@ -97,11 +97,12 @@ HDRSUM="$( (cat runtime/cpu.h runtime/web/compat/wasm_plat.h; echo "$CFLAGS $SHA
 # browser's virtual-LAN backend (runtime/web/net_lan.c); module.c + modheap.c
 # load the lifted server.dll; enhance.c holds the graphics options (all off by
 # default, as on the Mac).
-# FlatOut's lit image owns several addresses the NFSU2 patch modules override,
-# so overrides.c stays out (fo2_compat.c is its FlatOut counterpart).  drift.c
-# and netrace.c are still needed: roam.c calls drift_frame and the natneg/relay
-# overrides resolve there, with the lift renaming their guest functions.
-RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope fo2_compat flatout_alt_key flatout_spy_dbg debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie drift netrace"
+# FlatOut's lit image owns several addresses that the NFSU2 patch modules
+# override, so overrides.c and netrace.c stay out (fo2_compat.c is their FlatOut
+# counterpart; netrace.c's sub_0053ed20/sub_004b3e40 are NFS code that would run
+# at FlatOut addresses).  drift.c is FlatOut's own free-roam drift module and is
+# needed: roam.c calls drift_frame.
+RT="mem dispatch genexec heap watchdog win32 win32_ext com flatout_sha effect_smp_scope fo2_compat flatout_alt_key flatout_spy_dbg debug res fileio d3dx_hle vsemu oracle autotest lifecycle widescreen framerate dinput_pad dikeys keyboard dinput_kbd career intro drifttest roam roam_core roam_game mprace horn hornmenu powerunits carsfx racehorn racenet winsock online module modheap enhance headlights language sponsors lobbyclick olfilter tunegraph menusize regional sndlead carshadow movie drift"
 WEB="$(cd runtime/web && ls *.c | sed 's/\.c$//')"
 # Runtime membership is build-configuration-dependent. Remove stale objects
 # from a previous NFS build before linking, otherwise an omitted patch module
