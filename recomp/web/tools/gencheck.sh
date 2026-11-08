@@ -18,8 +18,15 @@ set -e -o pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"; cd "$ROOT"
 G="${GEN:-gen}"
 [ -f "$G/all/decls.h" ] || { echo "$G/all missing: run web/gen.sh <path to SPEED2.EXE>"; exit 1; }
-STALE=$(grep -ohE 'sub_00[0-9a-f]{6}_orig' runtime/*.c runtime/*.m | sort -u | while read -r f; do
-  grep -q "void $f(" "$G/all/decls.h" || echo "$f"; done)
+# overrides.c is the NFS patch set (FlatOut uses fo2_compat.c); the lift leaves
+# its functions un-renamed (see genstamp.sh), so its sub_X_orig are not expected.
+# A sub_X_orig whose un-renamed sub_X is also absent from decls.h names an
+# address outside .text (a data-section override the lifter cannot emit): skip it.
+SRCS=$(ls runtime/*.c runtime/*.m | grep -vE '/overrides\.c$')
+STALE=$(grep -ohE 'sub_00[0-9a-f]{6}_orig' $SRCS | sort -u | while read -r f; do
+  grep -q "void $f(" "$G/all/decls.h" && continue
+  grep -q "void ${f%_orig}(" "$G/all/decls.h" || continue
+  echo "$f"; done)
 [ -z "$STALE" ] || { echo "$G/all is older than the runtime (not lifted as _orig: $(echo $STALE | tr '\n' ' ')): run web/gen.sh <SPEED2.EXE>"; exit 1; }
 if [ ! -f "$G/all/stamp.txt" ]; then
   echo "note: $G/all has no stamp (made before gen.sh wrote one): only its _orig declarations were checked; web/gen.sh <SPEED2.EXE> makes a stamped one"

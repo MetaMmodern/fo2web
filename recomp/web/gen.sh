@@ -38,6 +38,9 @@ for d in gen/all gen/server; do
     exit 1
   fi
 done
+# Guest UI message handlers the runtime patches by address: reachable only from
+# runtime code, so they must be seeded into the lift (genall.py SEEDS).
+export SEEDS="${SEEDS:-$ROOT/web/seeds.txt}"
 PY="$ROOT/.venv/bin/python"
 mkdir -p out gen/all
 # never label a new lift with an old run's options, never reuse an old flag table

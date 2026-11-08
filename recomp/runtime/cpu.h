@@ -301,10 +301,12 @@ static inline void fcompare(struct CPU *c, double a, double b){
     else if (a < b)            c->fsw |= FSW_C0;
     else                       c->fsw |= FSW_C3;
 }
-/* fcomi / fucomi: write EFLAGS directly */
-#define FCOMI(a,b) do{ double _x=(a),_y=(b); \
-    if(_x!=_x||_y!=_y){ RG_(zf)=1;RG_(pf)=1;RG_(cf)=1; } \
-    else { RG_(pf)=0; RG_(zf)=(_x==_y); RG_(cf)=(_x<_y); } RG_(of)=RG_(sf)=RG_(af)=0; }while(0)
+/* fcomi / fucomi: write EFLAGS directly.  The locals are named to avoid
+ * colliding with the optimised lift's x87 slot array `_x[]` (X87OPT), which
+ * can appear in the arguments: FCOMI(_x[5], _x[6]). */
+#define FCOMI(a,b) do{ double _fcomi_a=(a),_fcomi_b=(b); \
+    if(_fcomi_a!=_fcomi_a||_fcomi_b!=_fcomi_b){ RG_(zf)=1;RG_(pf)=1;RG_(cf)=1; } \
+    else { RG_(pf)=0; RG_(zf)=(_fcomi_a==_fcomi_b); RG_(cf)=(_fcomi_a<_fcomi_b); } RG_(of)=RG_(sf)=RG_(af)=0; }while(0)
 
 /* ---- EFLAGS pack/unpack (pushfd/popfd/sahf) --------------------------- */
 static inline uint32_t eflags_get(const struct CPU *c){

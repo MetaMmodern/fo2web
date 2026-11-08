@@ -7,7 +7,13 @@ secs=[]
 for s in pe.sections:
     nm=s.Name.rstrip(b'\x00').decode('latin1').strip() or '<none>'
     secs.append((nm, IB+s.VirtualAddress, s.Misc_VirtualSize, s.get_data()))
-blob = next(d for nm,va,vs,d in secs if nm=='<none>')
+blob = next((d for nm,va,vs,d in secs if nm=='<none>'), None)
+if blob is None:
+    # FlatOut 2's exe keeps a normal relocation directory (.reloc), not the
+    # zeroed directory + unnamed section this diagnostic was written for:
+    # there is nothing to parse here, and it is not needed by the lift.
+    print("reloc2: no unnamed section (normal relocation directory): nothing to parse")
+    sys.exit(0)
 
 off=0; tot=0; types=collections.Counter(); addrs=[]; blocks=0; bad=0
 while off+8 <= len(blob):
