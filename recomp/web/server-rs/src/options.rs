@@ -7,7 +7,7 @@
 //!        [--host <name>[,<name>...]] [--state <dir>]
 //!        [--trusted-proxies cloudflare,<ip>,<cidr>,...] [--real-ip-header x-forwarded-for|cf-connecting-ip]
 //!        [--max-peers 128] [--online on|off] [--roam-hub on|off] [--vault-gb 50] [--access-log]
-//!        [--spy-relay[=29900=gpcm.openspy.net:29900,...]]
+//!        [--spy-relay[=29900=gpcm.openspy.net:29900,...]] [--spy-udp-ports low-high]
 //!        [--dev [--artifacts <dir>] [--lan-impair <spec>] [--online-trace <file>]]
 //!
 //! Options with a value can also come from the environment as NFSU2_<OPTION> (NFSU2_DATA, NFSU2_PORT,
@@ -18,7 +18,7 @@ use nfsu2_online::{PORT_BUDDY, PORT_HTTP, PORT_LOBBY, PORT_REDIRECTOR};
 
 use crate::paths;
 
-pub const VALUE_OPTS: [&str; 20] = [
+pub const VALUE_OPTS: [&str; 21] = [
     "--data",
     "--dist",
     "--wasm",
@@ -39,6 +39,7 @@ pub const VALUE_OPTS: [&str; 20] = [
     "--online-trace",
     "--roam-hub",
     "--vault-gb",
+    "--spy-udp-ports",
 ];
 pub const FLAG_OPTS: [&str; 3] = ["--behind-proxy", "--dev", "--access-log"];
 
@@ -86,6 +87,8 @@ pub struct Options {
     /// the OpenSpy relay's table (nfsu2-online's spy.rs): the game's connections to these ports go to the real
     /// servers on the internet; empty: the relay is off (--spy-relay)
     pub spy_relay: Vec<(u16, String)>,
+    /// the relay's externally reachable UDP worker sockets' port range, `low-high`; None: ephemeral (0.0.0.0:0)
+    pub spy_udp_ports: Option<(u16, u16)>,
     pub tls: Tls,
     /// where the TLS port listens: "::" (IPv6 and IPv4, dual stack, so AAAA records work; IPv4 alone where the
     /// machine has no IPv6), unless --bind was given
@@ -243,6 +246,29 @@ fn spy_table(spec: &str) -> Result<Vec<(u16, String)>, String> {
     Ok(t)
 }
 
+/// The relay's externally reachable UDP worker sockets' port range from `--spy-udp-ports` (`28100-28355`, or a
+/// single port).  The worker sockets must be reachable from the internet, so a bounded range lets the firewall
+/// allow only those ports.  Empty: None, the relay binds ephemeral sockets as before.
+fn udp_port_range(spec: &str) -> Result<Option<(u16, u16)>, String> {
+    let t = spec.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let bad = || format!("--spy-udp-ports: low-high (28100-28355), not \"{spec}\"");
+    let port = |s: &str| {
+        let ok = !s.is_empty() && s.len() <= 5 && s.bytes().all(|c| c.is_ascii_digit());
+        s.parse::<u32>().ok().filter(|n| ok && (1..=65535).contains(n)).map(|n| n as u16)
+    };
+    let (low, high) = match t.split_once('-') {
+        Some((l, h)) => (port(l), port(h)),
+        None => (port(t), port(t)),
+    };
+    match (low, high) {
+        (Some(l), Some(h)) if l <= h => Ok(Some((l, h))),
+        _ => Err(bad()),
+    }
+}
+
 /// The options from the command line (without the program's name) and the environment; Err: the message the server
 /// dies with (main's `die`).  `repo`: the repository the defaults are in; `cwd`: what relative paths are resolved
 /// against.
@@ -350,6 +376,8 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
             _ => Vec::new(),
         },
     };
+    // the relay's externally reachable UDP worker sockets' ports (None: ephemeral)
+    let spy_udp_ports = udp_port_range(&arg("--spy-udp-ports", "").unwrap_or_default())?;
 
     if !truthy(&data_arg) || (!fs.exists(&paths::join(&data, "SPEED2.EXE")) && !fs.exists(&paths::join(&data, "FlatOut2.exe"))) {
         let got = if truthy(&data_arg) { data.as_str() } else { "nothing" };
@@ -476,6 +504,7 @@ pub fn parse(argv: &[String], env: &dyn Fn(&str) -> Option<String>, repo: &str, 
         vault_gb,
         online_trace,
         spy_relay,
+        spy_udp_ports,
         tls,
         bind,
         bind_set,
@@ -576,7 +605,7 @@ mod tests {
             format!(
                 "unknown option --no-such-option\noptions: {}",
                 "--data --dist --wasm --port --http-port --http-bind --bind --state --tls-cert --tls-key --trusted-proxies --real-ip-header --max-peers \
-             --artifacts --lan-impair --host --online --online-trace --roam-hub --vault-gb --spy-relay --behind-proxy --dev --access-log"
+             --artifacts --lan-impair --host --online --online-trace --roam-hub --vault-gb --spy-udp-ports --spy-relay --behind-proxy --dev --access-log"
             )
         );
         assert_eq!(s.err(&["--http-port"], &[]), "--http-port needs a value");
@@ -696,6 +725,20 @@ mod tests {
             "--spy-relay: port 20922 is the online host's own service's port: the relay cannot take it"
         );
         assert_eq!(s.err(&["--spy-relay", "--online", "off"], &[]), "--spy-relay relays the online mode's connections: it needs --online on");
+    }
+
+    // --spy-udp-ports: a range, a single port, empty (ephemeral), and the invalid forms
+    #[test]
+    fn the_spy_udp_ports_option() {
+        let s = Setup::new();
+        assert_eq!(s.parse(&["--spy-udp-ports", "28100-28355"], &[]).unwrap().spy_udp_ports, Some((28100, 28355)));
+        assert_eq!(s.parse(&[], &[("NFSU2_SPY_UDP_PORTS", "28100-28355")]).unwrap().spy_udp_ports, Some((28100, 28355)));
+        assert_eq!(s.parse(&["--spy-udp-ports", "28100"], &[]).unwrap().spy_udp_ports, Some((28100, 28100)));
+        assert_eq!(s.parse(&[], &[]).unwrap().spy_udp_ports, None);
+        assert_eq!(s.parse(&[], &[("NFSU2_SPY_UDP_PORTS", "")]).unwrap().spy_udp_ports, None);
+        for e in ["28355-28100", "0-100", "28100-70000", "abc-def", "28100-", "-28355", "a"] {
+            assert!(s.err(&["--spy-udp-ports", e], &[]).contains("--spy-udp-ports: low-high (28100-28355)"), "{e}");
+        }
     }
 
     #[test]

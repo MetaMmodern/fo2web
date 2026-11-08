@@ -50,6 +50,7 @@ fn on_its_own_thread() {
         log: Arc::new(move |s: &str, k: Option<&str>| l2.lock().push((s.to_string(), k.map(str::to_string)))),
         tap: None,
         spy: Vec::new(),
+        spy_udp_ports: None,
     });
     let out: Arc<Mutex<Vec<(u32, Bytes)>>> = Arc::default();
     let o2 = out.clone();
@@ -97,7 +98,7 @@ fn stop_writes_what_is_kept() {
     let dir = tmp.path().join("online");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("buddies.json"), r#"{"personas":[{"name":"Alpha","seen":"2025-01","B":["Bravo"]}]}"#).unwrap();
-    let host = OnlineHost::spawn(OnlineOptions { state_dir: Some(dir.clone()), log: Arc::new(|_: &str, _: Option<&str>| {}), tap: None, spy: Vec::new() });
+    let host = OnlineHost::spawn(OnlineOptions { state_dir: Some(dir.clone()), log: Arc::new(|_: &str, _: Option<&str>| {}), tap: None, spy: Vec::new(), spy_udp_ports: None });
     let out: Arc<Mutex<Vec<Bytes>>> = Arc::default();
     let o2 = out.clone();
     host.attach_switch(Arc::new(move |_, f, _| {

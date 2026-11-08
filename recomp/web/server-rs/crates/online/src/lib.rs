@@ -112,6 +112,8 @@ pub struct OnlineOptions {
     /// the OpenSpy relay's table (spy.rs): the game's connections to these ports go to the real servers on the
     /// internet; empty: the relay is off (--spy-relay)
     pub spy: Vec<(u16, String)>,
+    /// the relay's externally reachable UDP worker sockets' port range, `low-high`; None: ephemeral (0.0.0.0:0)
+    pub spy_udp_ports: Option<(u16, u16)>,
 }
 
 enum Event {
@@ -153,6 +155,7 @@ fn run(o: OnlineOptions, rx: mpsc::Receiver<Event>) {
         buddy_limits: Default::default(),
         vhost: Default::default(),
         spy: o.spy,
+        spy_udp_ports: o.spy_udp_ports,
     });
     loop {
         let ev = match core.next_due() {

@@ -1,0 +1,58 @@
+# FlatOut 2 in the browser: a minimal host-networked STAGING deployment (do not run in production).
+#
+# This is a companion to FLATOUT_COOLIFY.md.  The production app is a Coolify "Docker Image"
+# resource on the bridge network; that cannot reach the relay's UDP, so the eventual
+# production move is to host networking.  This file is a throwaway host-networked instance to
+# prove the network path first, with the relay still OFF (HTTP only), on its own state folder,
+# so the live production container and Graphito are untouched.
+#
+# It deliberately has NO Caddy and NO proxy of its own: Coolify's Traefik stays the HTTPS
+# front, routed to this server through host.docker.internal (see FLATOUT_COOLIFY.md,
+# "Host networking (staging)").  Nothing here binds 80 or 443.
+#
+# network_mode: host shares the VPS's network namespace, so:
+#   - the server's 0.0.0.0:18081 is reachable at the host's address (and host.docker.internal),
+#     which is how Traefik reaches it;
+#   - later, the relay's UDP sockets bind straight to the VPS's public IP (the whole point).
+# Because it is host network, 18081 is also reachable from the Internet unless the firewall
+# blocks it: block 18081/tcp inbound for the duration of this test.
+#
+# In .env next to this file (or the environment):
+#   FLATOUT_IMAGE=ghcr.io/<owner>/<repo>-rs:sha-<commit>   the GHCR image (the server + frontend)
+#   STAGING_HOST=staging.example.com                      the HTTPS name Traefik will route
+#   FLATOUT_GAME=/srv/flatout/game                         the game folder (read-only)
+#   FLATOUT_MODULE=/srv/flatout/module                     nfsu2.wasm + nfsu2.json (read-only)
+#   FLATOUT_STATE_STAGING=/srv/flatout/state-staging       a SEPARATE writable state folder
+#                                                          (never the production state)
+#   NFSU2_WASM=/module/releases/<id>/nfsu2.wasm            the staged module (default /module/nfsu2.wasm)
+# then:  docker compose -f compose.flatout.staging.yml up -d
+name: flatout-staging
+services:
+  server:
+    image: ${FLATOUT_IMAGE:?set FLATOUT_IMAGE in .env (ghcr.io/<owner>/<repo>-rs:sha-<commit>)}
+    restart: unless-stopped
+    network_mode: host
+    command: ["--behind-proxy"]
+    environment:
+      # the staging name Traefik serves; the server answers only for its own names
+      NFSU2_HOST: ${STAGING_HOST:?set STAGING_HOST in .env (staging.example.com)}
+      # reachable from the host's address so Traefik (host.docker.internal) can reach it
+      NFSU2_HTTP_BIND: 0.0.0.0
+      NFSU2_HTTP_PORT: "18081"
+      NFSU2_DATA: /game
+      NFSU2_STATE: /state
+      # online=on is required for the relay (which is OFF for this HTTP test, but keep it on
+      # to match the eventual production config)
+      NFSU2_ONLINE: "on"
+      NFSU2_ROAM_HUB: "off"
+      NFSU2_WASM: ${NFSU2_WASM:-/module/nfsu2.wasm}
+      # the relay stays OFF for the initial HTTP test: no --spy-relay, and NFSU2_SPY_RELAY unset
+    volumes:
+      - ${FLATOUT_GAME:-/srv/flatout/game}:/game:ro
+      - ${FLATOUT_MODULE:-/srv/flatout/module}:/module:ro
+      - ${FLATOUT_STATE_STAGING:-/srv/flatout/state-staging}:/state
+    # as in the inherited NFS compose: nothing writable but /state, no capabilities, no swap
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: { driver: local }

@@ -393,6 +393,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: table,
+            spy_udp_ports: None,
         });
         let out: Arc<Mutex<Vec<F>>> = Arc::default();
         let o2 = out.clone();

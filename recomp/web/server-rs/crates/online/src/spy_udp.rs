@@ -103,13 +103,15 @@ pub struct SpyUdp {
     /// Shared across the guest's sockets: the game opens a separate one for its
     /// NAT-negotiation library, so `hosting` cannot live in a single worker.
     hosting: HashMap<u32, Arc<AtomicBool>>,
+    /// The worker sockets' port range (`low-high`); None: bind ephemeral, as before.
+    udp_ports: Option<(u16, u16)>,
     /// (destination, port) pairs already reported, so the log has one line each
     logged: std::collections::HashSet<(u32, u16)>,
     timer: Option<TimerId>,
 }
 
 impl SpyUdp {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, udp_ports: Option<(u16, u16)>) -> Self {
         Self {
             enabled,
             targets: [
@@ -125,9 +127,25 @@ impl SpyUdp {
             public_target: None,
             sessions: HashMap::new(),
             hosting: HashMap::new(),
+            udp_ports,
             logged: std::collections::HashSet::new(),
             timer: None,
         }
+    }
+
+    /// The worker's externally reachable UDP socket.  When a range is set, bind the first free port of it so the
+    /// firewall can allow exactly that range; the port is freed when the worker drops the socket.  None: every port
+    /// of the range is taken.
+    fn bind_udp_socket(&self) -> Option<UdpSocket> {
+        let socket = match self.udp_ports {
+            None => UdpSocket::bind("0.0.0.0:0").ok(),
+            Some((low, high)) => (low..=high).find_map(|port| {
+                UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).ok()
+            }),
+        };
+        let socket = socket?;
+        socket.set_nonblocking(true).ok()?;
+        Some(socket)
     }
 }
 
@@ -415,6 +433,7 @@ fn deliver_hosted(
 }
 
 fn worker(
+    socket: UdpSocket,
     targets: [String; 4],
     peer_map: HashMap<SocketAddrV4, SocketAddrV4>,
     outbound: Receiver<Outbound>,
@@ -423,13 +442,7 @@ fn worker(
     stop: Arc<AtomicBool>,
     hosting: Arc<AtomicBool>,
 ) {
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(socket) => socket,
-        Err(error) => { trace(format_args!("bind failed: {error}")); return; }
-    };
-    if socket.set_nonblocking(true).is_err() {
-        return;
-    }
+    // `socket` is bound (to a range port, or ephemeral) and non-blocking already.
 
     // Only endpoints actually sent to are allowed to reply. NAT endpoints
     // retain their guest-facing alias even though their real IP is different;
@@ -976,9 +989,18 @@ impl Core {
             let stop = Arc::new(AtomicBool::new(false));
             let worker_stop = stop.clone();
             let hosting = spy.hosting.entry(from).or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+            let socket = match spy.bind_udp_socket() {
+                Some(socket) => socket,
+                None => {
+                    // every port of the range is taken: drop the datagram rather than
+                    // open an unbounded socket outside the firewall's allowance
+                    trace(format_args!("spy-udp: no port free in the range for {from:08x}:{sport}"));
+                    return true;
+                }
+            };
             if thread::Builder::new()
                 .name(format!("spy-udp-{from:08x}-{sport}"))
-                .spawn(move || worker(targets, peer_map, outbound_rx, inbound_tx, public_target, worker_stop, hosting))
+                .spawn(move || worker(socket, targets, peer_map, outbound_rx, inbound_tx, public_target, worker_stop, hosting))
                 .is_err()
             {
                 trace(format_args!("worker spawn failed for {from:08x}:{sport}"));
@@ -1090,6 +1112,31 @@ mod tests {
         endpoint.parse().expect("IPv4 endpoint")
     }
 
+    #[test]
+    fn udp_port_range_allocation_binding_exhaustion_and_reuse() {
+        // A free port, found by binding and dropping an ephemeral socket.
+        let probe = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        // A single-port range: the first bind takes it, the next finds none.
+        let spy = SpyUdp::new(true, Some((port, port)));
+        let first = spy.bind_udp_socket().expect("the port is free");
+        assert_eq!(first.local_addr().unwrap().port(), port);
+        assert!(spy.bind_udp_socket().is_none(), "the range is exhausted");
+
+        // Dropping the socket frees the port for reuse.
+        drop(first);
+        let again = spy.bind_udp_socket().expect("the port is free again");
+        assert_eq!(again.local_addr().unwrap().port(), port);
+        drop(again);
+
+        // Without a range the socket binds ephemerally (a nonzero port).
+        let ephemeral = SpyUdp::new(true, None);
+        let sock = ephemeral.bind_udp_socket().expect("ephemeral bind");
+        assert_ne!(sock.local_addr().unwrap().port(), 0);
+    }
+
     fn test_core(t: &Rc<Cell<f64>>) -> Core {
         let (a, b) = (t.clone(), t.clone());
         Core::new(CoreOptions {
@@ -1101,6 +1148,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: vec![(28910, "unused:28910".into())],
+            spy_udp_ports: None,
         })
     }
 
@@ -1305,6 +1353,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: vec![(28910, "unused:28910".into())],
+            spy_udp_ports: None,
         });
         let public_ip = Ipv4Addr::new(212, 47, 146, 210);
         let advertised = SocketAddrV4::new(public_ip, 5571);
@@ -1372,6 +1421,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: vec![(28910, "unused:28910".into())],
+            spy_udp_ports: None,
         });
         core.spy_udp.targets[2] = master.local_addr().unwrap().to_string();
         let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
@@ -1549,6 +1599,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: vec![(28910, "unused:28910".into())],
+            spy_udp_ports: None,
         });
         core.spy_udp.targets[0] = remote.to_string();
         let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
@@ -1599,6 +1650,7 @@ mod tests {
             buddy_limits: Default::default(),
             vhost: Default::default(),
             spy: vec![(28910, "unused:28910".into())],
+            spy_udp_ports: None,
         });
         let n1 = nat1.local_addr().unwrap().to_string();
         let n2 = nat2.local_addr().unwrap().to_string();

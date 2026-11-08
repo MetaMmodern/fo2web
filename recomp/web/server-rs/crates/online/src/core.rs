@@ -35,6 +35,8 @@ pub struct CoreOptions {
     /// the OpenSpy relay's table (spy.rs): the game's connections to these ports go to the real servers on the
     /// internet; empty: the relay is off
     pub spy: Vec<(u16, String)>,
+    /// the relay's externally reachable UDP worker sockets' port range, `low-high`; None: ephemeral (0.0.0.0:0)
+    pub spy_udp_ports: Option<(u16, u16)>,
 }
 
 pub struct Core {
@@ -98,7 +100,7 @@ impl Core {
             buddies: Buddies::new(o.state_dir, o.buddy_limits),
             stats,
             spy: spy::Spy::new(o.spy),
-            spy_udp: spy_udp::SpyUdp::new(spy_on),
+            spy_udp: spy_udp::SpyUdp::new(spy_on, o.spy_udp_ports),
             #[cfg(test)]
             probe: Vec::new(),
             #[cfg(test)]

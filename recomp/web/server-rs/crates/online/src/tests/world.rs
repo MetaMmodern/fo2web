@@ -126,6 +126,7 @@ impl World {
             buddy_limits: o.buddy,
             vhost: VhostLimits::default(),
             spy: Vec::new(),
+            spy_udp_ports: None,
         });
         let outbox: Outbox = Arc::default();
         let slow: Arc<Mutex<HashSet<u32>>> = Arc::default();

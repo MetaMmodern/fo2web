@@ -123,6 +123,7 @@ pub async fn run(o: Options, cores: usize) {
             }),
             tap: tap.clone(),
             spy: o.spy_relay.clone(),
+            spy_udp_ports: o.spy_udp_ports,
         })
     });
     // (its lines: the cap on the players' links going down while the server is busy and back up, at most one every 5 s)
