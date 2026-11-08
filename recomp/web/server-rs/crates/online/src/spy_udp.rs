@@ -71,6 +71,12 @@ enum Target {
     HostedClient(u16),
     /// A reply to a hosted session's client by the address it joined from.
     HostedAddr(SocketAddrV4),
+    /// A guest dialed a peer's private (usually LAN) address, but the peer is only
+    /// reachable at `remote` (its public endpoint, learned from natneg or the
+    /// peer's own datagrams).  Send to `remote`, and present the peer's replies
+    /// to the game as `present` — the address the game dialed — so its peer table
+    /// matches.
+    Mapped { remote: SocketAddrV4, present: SocketAddrV4 },
 }
 
 struct Outbound {
@@ -108,6 +114,19 @@ pub struct SpyUdp {
     hosting: HashMap<u32, Arc<AtomicBool>>,
     /// The worker sockets' port range (`low-high`); None: bind ephemeral, as before.
     udp_ports: Option<(u16, u16)>,
+    /// The relay host's own LAN address (computed once): a private destination on
+    /// this /24 is reachable and is sent straight to it; any other private
+    /// destination is a peer's LAN address and must be translated to its public
+    /// endpoint.
+    lan_ip: Option<Ipv4Addr>,
+    /// A test's stand-in for the relay host's LAN address (so "is this private
+    /// destination on our LAN?" is deterministic).
+    #[cfg(test)]
+    lan_ip_test: Option<Ipv4Addr>,
+    /// Per guest, the last *public* endpoint it sent to (the peer's reachable
+    /// address, learned from natneg or the peer's own datagrams).  A later send
+    /// to that peer's private/LAN address is translated to this endpoint.
+    last_public: HashMap<u32, SocketAddrV4>,
     /// (destination, port, peer ip) triples already reported, so the log has one
     /// line each: keying on the peer too keeps a game destination (peer set) from
     /// being swallowed by an earlier lookup to the same port (peer 0), which hid
@@ -134,9 +153,23 @@ impl SpyUdp {
             sessions: HashMap::new(),
             hosting: HashMap::new(),
             udp_ports,
+            lan_ip: lan_ip(),
+            #[cfg(test)]
+            lan_ip_test: None,
+            last_public: HashMap::new(),
             logged: std::collections::HashSet::new(),
             timer: None,
         }
+    }
+
+    /// Is `ip` on the relay host's own LAN (so a datagram to it is reachable),
+    /// rather than a remote peer's private address?
+    fn same_lan(&self, ip: Ipv4Addr) -> bool {
+        #[cfg(test)]
+        let lan = self.lan_ip_test.or(self.lan_ip);
+        #[cfg(not(test))]
+        let lan = self.lan_ip;
+        lan.map_or(false, |l| l.octets()[..3] == ip.octets()[..3])
     }
 
     /// The worker's externally reachable UDP socket.  When a range is set, bind the first free port of it so the
@@ -618,6 +651,13 @@ fn worker(
                         continue;
                     }
                 }
+                Target::Mapped { remote, present } => {
+                    // Sent to the peer's real (public) endpoint, but the peer's
+                    // replies are shown to the game as the address it dialed, so
+                    // its peer table matches (same-LAN peers are not mapped).
+                    let remote = public_target.unwrap_or(remote);
+                    (remote, u32::from(*present.ip()), Some(present.port()), false)
+                }
                 Target::Nat(index) => {
                     let address = nat_addresses[index].or_else(|| {
                         // DNS is deliberately confined to this worker, never Core.
@@ -905,7 +945,11 @@ impl Core {
             (crate::VHOST_VIP, port) if cid != 0 && port != 0 && self.spy_udp.enabled => {
                 let ip = Ipv4Addr::from(cid);
                 if public_ip_allowed(ip) {
-                    Target::Public(SocketAddrV4::new(ip, dport))
+                    let addr = SocketAddrV4::new(ip, dport);
+                    // Remember the peer's reachable (public) endpoint: a later
+                    // send to the same peer's private/LAN address maps to it.
+                    self.spy_udp.last_public.insert(from, addr);
+                    Target::Public(addr)
                 } else if self.spy_udp.hosting.get(&from).is_some_and(|h| h.load(Ordering::Relaxed)) {
                     // This guest is hosting: it is answering a client's
                     // reported private address, which the worker translates
@@ -913,10 +957,22 @@ impl Core {
                     // really joined).
                     Target::HostedAddr(SocketAddrV4::new(ip, dport))
                 } else if actual_private_ip_allowed(ip) {
-                    // A guest is joining a host at its real LAN address
-                    // (same-LAN play): the address is reachable, so send
-                    // straight to it instead of looking for a mapping.
-                    Target::Public(SocketAddrV4::new(ip, dport))
+                    let private = SocketAddrV4::new(ip, dport);
+                    if self.spy_udp.same_lan(ip) {
+                        // Same-LAN play: the peer's real LAN address is reachable
+                        // from the relay, so send straight to it.
+                        Target::Public(private)
+                    } else if let Some(&public) = self.spy_udp.last_public.get(&from) {
+                        // Cross-network play: the guest dialed the peer's LAN
+                        // address (from the session listing), but the peer is only
+                        // reachable at its public endpoint (from natneg).  Send
+                        // there and present the reply as the address the guest
+                        // dialed, so its peer table matches.
+                        Target::Mapped { remote: public, present: private }
+                    } else {
+                        // No public endpoint learned yet: best effort direct.
+                        Target::Public(private)
+                    }
                 } else {
                     return true;
                 }
@@ -930,6 +986,7 @@ impl Core {
                 Target::Public(a) => a.to_string(),
                 Target::HostedClient(syn) => format!("client:{syn}"),
                 Target::HostedAddr(addr) => format!("client:{addr}"),
+                Target::Mapped { remote, present } => format!("{remote} as {present}"),
             };
             let seen = (dest, dport, cid);
             if self.spy_udp.logged.insert(seen) {
@@ -1709,6 +1766,51 @@ mod tests {
         assert_eq!(&frame[4..8], &u32::from(lan_host).to_be_bytes());
         assert_eq!(&frame[8..12], &guest.to_be_bytes());
         assert_eq!(u16::from_be_bytes([frame[12], frame[13]]), host_addr.port());
+        assert_eq!(u16::from_be_bytes([frame[14], frame[15]]), 23756);
+    }
+
+    #[test]
+    fn a_cross_network_guest_is_mapped_to_the_peer_public_endpoint() {
+        // The guest dials the host's LAN address (from the session listing), but
+        // the host is only reachable at its public endpoint (learned from
+        // natneg).  The relay must send there and present the host's replies as
+        // the LAN address the guest dialed, so its peer table matches.
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let host_addr = match host.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        // A relay on 10.0.0.1: 192.168.100.30 is a *remote* peer's LAN, not ours.
+        core.spy_udp.lan_ip_test = Some(Ipv4Addr::new(10, 0, 0, 1));
+        core.spy_udp.public_target = Some(host_addr);
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| { out.lock().push(frame.to_vec()); SendResult::Sent }));
+
+        let guest = 0x0a4d_0002;
+        let public = Ipv4Addr::new(212, 47, 149, 11);
+        let lan = Ipv4Addr::new(192, 168, 100, 30);
+        let mut buf = [0u8; 64];
+        // The guest sends to the host's public endpoint first (natneg CONNECT /
+        // its reply), which is where a later LAN-address send must be routed.
+        assert!(core.spy_udp_send(guest, 23756, crate::VHOST_VIP, 8711, u32::from(public), b"nat"));
+        let (n, _) = host.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"nat");
+
+        // The join dials the host's LAN address; it must reach the public endpoint.
+        assert!(core.spy_udp_send(guest, 23756, crate::VHOST_VIP, 23756, u32::from(lan), b"join"));
+        let (n, relay) = host.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"join");
+
+        // The host's reply reaches the guest, which sees the LAN address it dialed.
+        host.send_to(b"reply", relay).unwrap();
+        let frame = wait_frame(&mut core, &sent, |frame| &frame[24..] == b"reply");
+        assert_eq!(&frame[4..8], &u32::from(lan).to_be_bytes());
+        assert_eq!(&frame[8..12], &guest.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([frame[12], frame[13]]), 23756);
         assert_eq!(u16::from_be_bytes([frame[14], frame[15]]), 23756);
     }
 
