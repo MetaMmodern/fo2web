@@ -24,7 +24,10 @@ pub const HOSTED_PEER_VIP: u32 = 0x0a4d1ff0;
 const NAT_PORT: u16 = 27901;
 const MAX_DATAGRAM: usize = 1464;
 const MAX_SESSIONS: usize = 256;
-const MAX_SESSIONS_PER_VIP: usize = 4;
+/// A hosted FlatOut 2 game opens several sockets — the master (QR) query, the
+/// QR report, the session search, the game socket and the natneg library's own
+/// — so one guest legitimately holds more than four sessions while it hosts.
+const MAX_SESSIONS_PER_VIP: usize = 16;
 const QUEUE_DEPTH: usize = 64;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -900,10 +903,17 @@ impl Core {
                 let ip = Ipv4Addr::from(cid);
                 if public_ip_allowed(ip) {
                     Target::Public(SocketAddrV4::new(ip, dport))
-                } else if self.spy_udp.sessions.keys().any(|k| k.guest_vip == from) {
-                    // A hosted player may have joined from a private address;
-                    // the worker sends it only if that address really joined.
+                } else if self.spy_udp.hosting.get(&from).is_some_and(|h| h.load(Ordering::Relaxed)) {
+                    // This guest is hosting: it is answering a client's
+                    // reported private address, which the worker translates
+                    // to the client's real endpoint (only if that address
+                    // really joined).
                     Target::HostedAddr(SocketAddrV4::new(ip, dport))
+                } else if actual_private_ip_allowed(ip) {
+                    // A guest is joining a host at its real LAN address
+                    // (same-LAN play): the address is reachable, so send
+                    // straight to it instead of looking for a mapping.
+                    Target::Public(SocketAddrV4::new(ip, dport))
                 } else {
                     return true;
                 }
@@ -956,6 +966,33 @@ impl Core {
             let now = Instant::now();
             spy.sessions
                 .retain(|_, session| now.duration_since(session.last_activity) < IDLE_TIMEOUT);
+
+            // A hosted reply to a client's *reported* address may have been
+            // recorded on a different worker of this guest (the game, the
+            // natneg library and the master query each have their own socket),
+            // so offer it to every session: only the worker that recorded the
+            // reported address sends it, as `HostedClient` does above.
+            if let Target::HostedAddr(addr) = target {
+                let mut delivered = false;
+                for (skey, session) in spy.sessions.iter_mut() {
+                    if skey.guest_vip != from {
+                        continue;
+                    }
+                    if session
+                        .outbound
+                        .try_send(Outbound { target: Target::HostedAddr(addr), packet: payload.to_vec() })
+                        .is_ok()
+                    {
+                        session.last_activity = now;
+                        delivered = true;
+                    }
+                }
+                hosted_diag(format_args!(
+                    "reply from {from:08x}:{sport} to the reported {addr} ({} bytes), delivered={delivered}",
+                    payload.len()
+                ));
+                return true;
+            }
 
             if let Some(session) = spy.sessions.get_mut(&key) {
                 if session.outbound.try_send(Outbound { target, packet: payload.to_vec() }).is_ok() {
@@ -1575,6 +1612,101 @@ mod tests {
         let (n, from) = client.recv_from(&mut buf).unwrap();
         assert_eq!(from, worker);
         assert_eq!(&buf[..n], b"reply");
+    }
+
+    #[test]
+    fn host_reply_to_a_reported_address_reaches_a_client_recorded_on_another_worker() {
+        // The host's game opens several sockets: the master query (whose QR
+        // report advertises it, so the client's join arrives there) and the
+        // game socket (which sends the host's reply).  The relay must find the
+        // client's reported private address on whichever worker recorded it.
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let master = UdpSocket::bind("127.0.0.1:0").unwrap();
+        master.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        core.spy_udp.targets[2] = master.local_addr().unwrap().to_string();
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| { out.lock().push(frame.to_vec()); SendResult::Sent }));
+
+        let vip = 0x0a4d_0002;
+        let query_port = 52599;
+        let game_port = 23756;
+        // The QR status goes from the master-query socket, so the master
+        // advertises that worker's address and the client's join arrives there.
+        assert!(core.spy_udp_send(
+            vip, query_port, crate::VHOST_VIP, 27900, 0,
+            b"\x03\xe4localip0\x0010.77.1.2\x00localport\x0023756\x00",
+        ));
+        let mut buf = [0u8; 1024];
+        let (_, worker) = master.recv_from(&mut buf).unwrap();
+
+        // The client joins that worker with a real 0x6b join reporting a
+        // private address; the worker records reported address -> endpoint.
+        let mut join = vec![0u8; 109];
+        join[0] = 0x6b;
+        join[2..6].copy_from_slice(&0x53_33_df_37u32.to_be_bytes());
+        join[10..14].copy_from_slice(b"FO14");
+        join[28..32].copy_from_slice(&[192, 168, 100, 30]);
+        join[44..46].copy_from_slice(&0x5cccu16.to_be_bytes());
+        client.send_to(&join, worker).unwrap();
+        wait_frame(&mut core, &sent, |frame| frame[24] == 0x6b);
+
+        // The host's game replies from a *different* socket to the client's
+        // reported private address; the relay must find the client there.
+        let reported = Ipv4Addr::new(192, 168, 100, 30);
+        assert!(core.spy_udp_send(
+            vip, game_port, crate::VHOST_VIP, 0x5ccc, u32::from(reported), b"reply",
+        ));
+        let (n, from) = client.recv_from(&mut buf).unwrap();
+        assert_eq!(from, worker);
+        assert_eq!(&buf[..n], b"reply");
+    }
+
+    #[test]
+    fn a_guest_joining_a_host_on_the_lan_forwards_directly() {
+        // Same-LAN play with a native (non-relay) host: the guest's join to
+        // the host's real LAN address must be sent straight there, not treated
+        // as a host's reply to a client's reported address (which needs a
+        // mapping the host never created).
+        let host = UdpSocket::bind("127.0.0.1:0").unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let host_addr = match host.local_addr().unwrap() {
+            SocketAddr::V4(a) => a,
+            _ => unreachable!(),
+        };
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        // Redirect the direct send to the local test socket (no packet leaves
+        // the process); the target address is still the private LAN one.
+        core.spy_udp.public_target = Some(host_addr);
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| { out.lock().push(frame.to_vec()); SendResult::Sent }));
+
+        // The guest is NOT hosting; it sends its join to the host's private
+        // LAN address on the game port.
+        let guest = 0x0a4d_0102;
+        let lan_host = Ipv4Addr::new(192, 168, 100, 30);
+        assert!(core.spy_udp_send(guest, 23756, crate::VHOST_VIP, 23756, u32::from(lan_host), b"join"));
+
+        let mut buf = [0u8; 64];
+        let (n, relay) = host.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"join");
+
+        // The host's reply reaches the guest, which sees it come from the
+        // host's real LAN address.
+        host.send_to(b"reply", relay).unwrap();
+        let frame = wait_frame(&mut core, &sent, |frame| &frame[24..] == b"reply");
+        // The guest sees the reply from the host's LAN address and from the
+        // port the host actually answered from (the test's own socket).
+        assert_eq!(&frame[4..8], &u32::from(lan_host).to_be_bytes());
+        assert_eq!(&frame[8..12], &guest.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([frame[12], frame[13]]), host_addr.port());
+        assert_eq!(u16::from_be_bytes([frame[14], frame[15]]), 23756);
     }
 
     #[test]
