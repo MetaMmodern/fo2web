@@ -108,8 +108,11 @@ pub struct SpyUdp {
     hosting: HashMap<u32, Arc<AtomicBool>>,
     /// The worker sockets' port range (`low-high`); None: bind ephemeral, as before.
     udp_ports: Option<(u16, u16)>,
-    /// (destination, port) pairs already reported, so the log has one line each
-    logged: std::collections::HashSet<(u32, u16)>,
+    /// (destination, port, peer ip) triples already reported, so the log has one
+    /// line each: keying on the peer too keeps a game destination (peer set) from
+    /// being swallowed by an earlier lookup to the same port (peer 0), which hid
+    /// the join/race addresses.
+    logged: std::collections::HashSet<(u32, u16, u32)>,
     timer: Option<TimerId>,
 }
 
@@ -928,7 +931,7 @@ impl Core {
                 Target::HostedClient(syn) => format!("client:{syn}"),
                 Target::HostedAddr(addr) => format!("client:{addr}"),
             };
-            let seen = (dest, dport);
+            let seen = (dest, dport, cid);
             if self.spy_udp.logged.insert(seen) {
                 (self.log)(
                     &format!(
