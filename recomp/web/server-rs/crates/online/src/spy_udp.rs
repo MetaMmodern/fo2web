@@ -1263,6 +1263,7 @@ impl Core {
         self.spy_udp.sessions
             .retain(|key, _| key.guest_vip != vip);
         self.spy_udp.hosting.remove(&vip);
+        self.spy_udp.last_public.remove(&vip);
     }
 }
 
@@ -1322,6 +1323,19 @@ mod tests {
             spy: vec![(28910, "unused:28910".into())],
             spy_udp_ports: None,
         })
+    }
+
+    #[test]
+    fn disconnect_clears_only_that_guests_remembered_endpoint() {
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        let guest = 0x0a4d_0002;
+        let other = 0x0a4d_0003;
+        core.spy_udp.last_public.insert(guest, v4("212.47.149.11:2827"));
+        core.spy_udp.last_public.insert(other, v4("212.47.149.12:2828"));
+        core.spy_udp_peer_gone(guest);
+        assert!(!core.spy_udp.last_public.contains_key(&guest));
+        assert_eq!(core.spy_udp.last_public.get(&other), Some(&v4("212.47.149.12:2828")));
     }
 
     /// Wait for the worker to relay a frame matching `predicate` (removing it

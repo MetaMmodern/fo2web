@@ -9,6 +9,9 @@
 #include <time.h>
 #include <setjmp.h>
 #include <unistd.h>
+#ifdef FLATOUT2
+#include "flatout_adapter.h"
+#endif
 
 /* getenv() SCANS the environment array and takes a lock on every call.  On
  * per-draw paths (e.g. the "PDLIST" check in SetVertexShaderConstantF was
@@ -930,17 +933,21 @@ int win32_call(CPU *c, uint32_t idx){
         if (!psz || !mem_is_committed(psz)) r=87u; /* ERROR_INVALID_PARAMETER */
         else if (!p || MR32(psz)<need){ MR32(psz)=need; r=111u; /* ERROR_BUFFER_OVERFLOW */ }
         else {
+            char ip[16], mask[16];
+            if (!flatout_adapter_identity(&g_ws_id, ip, mask)) {
+                r=232u; /* ERROR_NO_DATA: WSAStartup has no network identity yet */
+            } else {
             mem_commit(p,need); memset(g_mem+p,0,need);
-            snprintf((char*)g_mem+p+8u,260,"VLAN-2");
+            snprintf((char*)g_mem+p+8u,260,"%s",g_ws_id.name);
             snprintf((char*)g_mem+p+268u,132,"FlatOut Web Virtual LAN");
-            MR32(p+400u)=6u; MR8(p+404u)=0x02; MR8(p+405u)=0x4e;
-            MR8(p+406u)=0x56; MR8(p+407u)=0x4c; MR8(p+408u)=0x00; MR8(p+409u)=0x02;
+            MR32(p+400u)=6u; memcpy(g_mem+p+404u,g_ws_id.mac,6);
             MR32(p+412u)=1u; MR32(p+416u)=6u; MR32(p+420u)=0u;
-            snprintf((char*)g_mem+p+432u,16,"10.77.0.2");
-            snprintf((char*)g_mem+p+448u,16,"255.255.224.0");
+            snprintf((char*)g_mem+p+432u,16,"%s",ip);
+            snprintf((char*)g_mem+p+448u,16,"%s",mask);
             snprintf((char*)g_mem+p+472u,16,"10.77.0.1");
             MR32(psz)=need; r=0;
-            fprintf(stderr,"[hle] FlatOut GetAdaptersInfo -> VLAN-2 10.77.0.2\n");
+            fprintf(stderr,"[hle] FlatOut GetAdaptersInfo -> %s %s\n",g_ws_id.name,ip);
+            }
         }
     }
     else if (!strcmp(n,"DialogBoxParamA") && ARG(c,1)==0x65u){
