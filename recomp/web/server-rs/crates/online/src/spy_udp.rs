@@ -753,13 +753,26 @@ fn worker(
             if fo14_connection_opener(&rewritten) {
                 if let Some(&(chosen_source, chosen_port)) = fo14_identity.get(&remote) {
                     if (chosen_source, chosen_port) != (guest_source, guest_port) {
-                    trace(format_args!(
-                        "suppressed FO14 opener to {remote} through alternate identity {guest_source:08x}:{guest_port:?}; canonical {chosen_source:08x}:{chosen_port:?}"
-                    ));
-                    pending = None;
-                    continue;
+                        // The mapped/private identity is the address carried by
+                        // the peer's FO14 join and therefore the one in the
+                        // game's peer table. Prefer it for presentation, while
+                        // still suppressing its duplicate wire-level opener.
+                        if chosen_port.is_none() && guest_port.is_some() {
+                            fo14_identity.insert(remote, (guest_source, guest_port));
+                            if let Some(contact) = contacted.get_mut(&remote) {
+                                contact.0 = guest_source;
+                                contact.1 = guest_port;
+                                contact.2 = now;
+                            }
+                        }
+                        trace(format_args!(
+                            "suppressed FO14 opener to {remote} through alternate identity {guest_source:08x}:{guest_port:?}; canonical {:?}",
+                            fo14_identity.get(&remote)
+                        ));
+                        pending = None;
+                        continue;
                     }
-                } else {
+                } else if fo14_identity.len() < CONTACTS_MAX {
                     fo14_identity.insert(remote, (guest_source, guest_port));
                 }
             }
@@ -1684,7 +1697,7 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_an_alternate_identity_fo14_opener_to_the_same_peer() {
+    fn alternate_identity_opener_is_suppressed_and_replies_use_the_private_identity() {
         let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
         peer.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
         let peer_addr = match peer.local_addr().unwrap() {
@@ -1693,6 +1706,12 @@ mod tests {
         };
         let t = Rc::new(Cell::new(0.0));
         let mut core = test_core(&t);
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| {
+            out.lock().push(frame.to_vec());
+            SendResult::Sent
+        }));
         let public_ip = Ipv4Addr::new(212, 47, 146, 210);
         let public_port = 5571;
         core.spy_udp.public_target = Some(peer_addr);
@@ -1707,7 +1726,7 @@ mod tests {
         assert!(core.spy_udp_send(vip, guest_port, crate::VHOST_VIP, public_port,
                                   u32::from(public_ip), &opener));
         let mut buf = [0u8; 128];
-        let (n, _) = peer.recv_from(&mut buf).unwrap();
+        let (n, routed_from) = peer.recv_from(&mut buf).unwrap();
         assert_eq!(n, opener.len());
 
         assert!(core.spy_udp_send(vip, guest_port, crate::VHOST_VIP, 23756,
@@ -1717,6 +1736,11 @@ mod tests {
             Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
                               || error.kind() == std::io::ErrorKind::TimedOut
         ));
+
+        peer.send_to(b"answer", routed_from).unwrap();
+        let frame = wait_frame(&mut core, &sent, |frame| &frame[24..] == b"answer");
+        assert_eq!(&frame[4..8], &u32::from(Ipv4Addr::new(192, 168, 200, 30)).to_be_bytes());
+        assert_eq!(&frame[12..14], &23756u16.to_be_bytes());
     }
 
     #[test]
