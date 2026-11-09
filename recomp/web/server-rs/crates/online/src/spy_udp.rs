@@ -228,6 +228,17 @@ fn preview_n(p: &[u8], max: usize) -> String {
 }
 fn preview(p: &[u8]) -> String { preview_n(p, 48) }
 
+/* FlatOut may race a peer's advertised public endpoint against the private
+ * address in its join packet. Both aliases collapse to one relay socket and
+ * one real endpoint; forwarding both openers creates overlapping logical
+ * handshakes from the same UDP source. */
+fn fo14_connection_opener(packet: &[u8]) -> bool {
+    packet.len() == 109
+        && packet.get(10..14) == Some(b"FO14")
+        && packet.get(21) == Some(&0x08)
+        && packet.get(22) == Some(&0x07)
+}
+
 /// The host's LAN address, where a LAN player can reach a hosted session
 /// without the router hairpinning the public endpoint.  FO2_SPY_LAN_IP wins;
 /// otherwise the routing table's primary address (no packet is sent).
@@ -510,6 +521,7 @@ fn worker(
     // retain their guest-facing alias even though their real IP is different;
     // a mapped public peer also writes the advertised public port back.
     let mut contacted = HashMap::<SocketAddrV4, (u32, Option<u16>, Instant)>::new();
+    let mut fo14_identity = HashMap::<SocketAddrV4, (u32, Option<u16>)>::new();
     let mut contact_order = VecDeque::new();
     let mut nat_addresses: [Option<SocketAddrV4>; 4] = [None, None, None, None];
     let mut buffer = [0u8; MAX_DATAGRAM];
@@ -738,6 +750,19 @@ fn worker(
                 item.packet.clone()
             };
             let tx = if via_lan { lan.as_ref().map(|l| &l.2) } else { None }.unwrap_or(&socket);
+            if fo14_connection_opener(&rewritten) {
+                if let Some(&(chosen_source, chosen_port)) = fo14_identity.get(&remote) {
+                    if (chosen_source, chosen_port) != (guest_source, guest_port) {
+                    trace(format_args!(
+                        "suppressed FO14 opener to {remote} through alternate identity {guest_source:08x}:{guest_port:?}; canonical {chosen_source:08x}:{chosen_port:?}"
+                    ));
+                    pending = None;
+                    continue;
+                    }
+                } else {
+                    fo14_identity.insert(remote, (guest_source, guest_port));
+                }
+            }
             match tx.send_to(&rewritten, remote) {
                 Ok(size) if size == rewritten.len() => {
                     if flow.is_some() { sent_ok += 1; last_remote = Some(remote); }
@@ -752,8 +777,18 @@ fn worker(
                             if let Some(old) = contact_order.pop_front() { contacted.remove(&old); }
                         }
                         contact_order.push_back(remote);
+                        let (source, port) = fo14_identity.get(&remote).copied().unwrap_or((guest_source, guest_port));
+                        contacted.insert(remote, (source, port, now));
+                    } else if let Some(contact) = contacted.get_mut(&remote) {
+                        if let Some(&(source, port)) = fo14_identity.get(&remote) {
+                            contact.0 = source;
+                            contact.1 = port;
+                        } else {
+                            contact.0 = guest_source;
+                            contact.1 = guest_port;
+                        }
+                        contact.2 = now;
                     }
-                    contacted.insert(remote, (guest_source, guest_port, now));
                     pending = None;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::Interrupted => break,
@@ -1586,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn alternating_public_and_private_sends_to_one_endpoint_keep_their_reply_presentations() {
+    fn alternating_public_and_private_sends_keep_their_reply_presentations() {
         // The fallback target stands in for the public peer's reachable socket;
         // a non-loopback advertised endpoint is required because the test hook
         // substitutes only the network destination, not the address presented
@@ -1632,6 +1667,56 @@ mod tests {
             assert_eq!(&frame[12..14], &presented_port.to_be_bytes());
             assert_eq!(&frame[14..16], &guest_port.to_be_bytes());
         }
+    }
+
+    #[test]
+    fn recognizes_only_fo14_connection_openers() {
+        let mut packet = vec![0u8; 109];
+        packet[10..14].copy_from_slice(b"FO14");
+        packet[21] = 0x08;
+        packet[22] = 0x07;
+        assert!(fo14_connection_opener(&packet));
+        packet[22] = 0x0d;
+        assert!(!fo14_connection_opener(&packet));
+        packet[22] = 0x07;
+        packet.pop();
+        assert!(!fo14_connection_opener(&packet));
+    }
+
+    #[test]
+    fn suppresses_an_alternate_identity_fo14_opener_to_the_same_peer() {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+        let peer_addr = match peer.local_addr().unwrap() {
+            SocketAddr::V4(addr) => addr,
+            _ => unreachable!(),
+        };
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        let public_ip = Ipv4Addr::new(212, 47, 146, 210);
+        let public_port = 5571;
+        core.spy_udp.public_target = Some(peer_addr);
+        core.spy_udp.lan_ip_test = Some(Ipv4Addr::new(192, 168, 100, 50));
+        let vip = 0x0a4d_0002;
+        let guest_port = 50123;
+        let mut opener = vec![0u8; 109];
+        opener[10..14].copy_from_slice(b"FO14");
+        opener[21] = 0x08;
+        opener[22] = 0x07;
+
+        assert!(core.spy_udp_send(vip, guest_port, crate::VHOST_VIP, public_port,
+                                  u32::from(public_ip), &opener));
+        let mut buf = [0u8; 128];
+        let (n, _) = peer.recv_from(&mut buf).unwrap();
+        assert_eq!(n, opener.len());
+
+        assert!(core.spy_udp_send(vip, guest_port, crate::VHOST_VIP, 23756,
+                                  u32::from(Ipv4Addr::new(192, 168, 200, 30)), &opener));
+        assert!(matches!(
+            peer.recv_from(&mut buf),
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+                              || error.kind() == std::io::ErrorKind::TimedOut
+        ));
     }
 
     #[test]
