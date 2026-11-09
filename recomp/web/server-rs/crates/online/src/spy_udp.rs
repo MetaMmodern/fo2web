@@ -99,11 +99,19 @@ struct Outbound {
 
 type Inbound = (u32, u16, Vec<u8>);
 
+/// Core and worker counters for the opt-in, per-worker interval summary.
+#[derive(Default)]
+struct FlowCounts {
+    queued: std::sync::atomic::AtomicU64,
+    queue_drop: std::sync::atomic::AtomicU64,
+}
+
 struct Session {
     outbound: SyncSender<Outbound>,
     inbound: Receiver<Inbound>,
     last_activity: Instant,
     stop: Arc<AtomicBool>,
+    flow: Option<Arc<FlowCounts>>,
 }
 
 impl Drop for Session {
@@ -493,6 +501,8 @@ fn worker(
     public_target: Option<SocketAddrV4>,
     stop: Arc<AtomicBool>,
     hosting: Arc<AtomicBool>,
+    flow: Option<Arc<FlowCounts>>,
+    key: SessionKey,
 ) {
     // `socket` is bound (to a range port, or ephemeral) and non-blocking already.
 
@@ -510,6 +520,19 @@ fn worker(
     let mut ingress_packet_tokens = EGRESS_PACKETS_PER_SECOND;
     let mut last_refill = Instant::now();
     let mut sent_traces = 0;
+    // Independent of the packet-trace budget. Each worker emits at most 24
+    // five-second active intervals, independent of idle intervals.
+    let mut flow_at = Instant::now();
+    let mut flow_lines = 0u32;
+    let mut sent_ok = 0u64;
+    let mut send_error = 0u64;
+    let mut recv_known = 0u64;
+    let mut recv_unknown = 0u64;
+    let mut recv_limited = 0u64;
+    let mut inbound_ok = 0u64;
+    let mut inbound_full = 0u64;
+    let mut last_remote: Option<SocketAddrV4> = None;
+    let mut last_present: Option<(u32, u16)> = None;
     // A hosted session is a server: other players connect to it without the
     // host having contacted them first.  The QR status response carrying
     // `localip0` marks this guest as such a session, shared across its sockets
@@ -531,6 +554,19 @@ fn worker(
     loop {
         if stop.load(Ordering::Relaxed) { return; }
         let now = Instant::now();
+        if let Some(flow) = &flow {
+            if flow_lines < 24 && now.duration_since(flow_at) >= Duration::from_secs(5) {
+                let queued = flow.queued.swap(0, Ordering::Relaxed);
+                let queue_drop = flow.queue_drop.swap(0, Ordering::Relaxed);
+                if queued + queue_drop + sent_ok + send_error + recv_known + recv_unknown > 0 {
+                    eprintln!("spy-udp-flow: guest={:08x}:{} udp={:?} queued={queued} queue_drop={queue_drop} sent={sent_ok} send_error={send_error} recv_known={recv_known} recv_unknown={recv_unknown} recv_limited={recv_limited} inbound_queued={inbound_ok} inbound_full={inbound_full} last_remote={last_remote:?} last_present={last_present:?}", key.guest_vip, key.guest_port, socket.local_addr());
+                    flow_lines += 1;
+                }
+                sent_ok = 0; send_error = 0; recv_known = 0; recv_unknown = 0;
+                recv_limited = 0; inbound_ok = 0; inbound_full = 0;
+                flow_at = now;
+            }
+        }
         tokens = (tokens + now.duration_since(last_refill).as_secs_f64() * EGRESS_BYTES_PER_SECOND)
             .min(EGRESS_BYTES_PER_SECOND);
         packet_tokens = (packet_tokens + now.duration_since(last_refill).as_secs_f64() * EGRESS_PACKETS_PER_SECOND)
@@ -704,6 +740,7 @@ fn worker(
             let tx = if via_lan { lan.as_ref().map(|l| &l.2) } else { None }.unwrap_or(&socket);
             match tx.send_to(&rewritten, remote) {
                 Ok(size) if size == rewritten.len() => {
+                    if flow.is_some() { sent_ok += 1; last_remote = Some(remote); }
                     if sent_traces < 3 {
                         trace(format_args!("sent {size} bytes from {:?} to {remote}", tx.local_addr()));
                         sent_traces += 1;
@@ -720,7 +757,7 @@ fn worker(
                     pending = None;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::Interrupted => break,
-                result => { trace(format_args!("send to {remote} failed or short: {result:?}")); pending = None; },
+                result => { if flow.is_some() { send_error += 1; } trace(format_args!("send to {remote} failed or short: {result:?}")); pending = None; },
             }
         }
 
@@ -728,6 +765,7 @@ fn worker(
             match socket.recv_from(&mut buffer) {
                 Ok((size, SocketAddr::V4(source))) => {
                     let known = contacted.contains_key(&source);
+                    if flow.is_some() { if known { recv_known += 1; } else { recv_unknown += 1; } }
                     // Record the player's reported address for every packet:
                     // the NAT-negotiation "connect" may have marked this public
                     // source as contacted before the join arrives, so we cannot
@@ -806,13 +844,16 @@ fn worker(
                     }
                     if let Some(&(guest_source, guest_port, sent_at)) = contacted.get(&source) {
                         if now.duration_since(sent_at) >= IDLE_TIMEOUT || ingress_tokens < size as f64 || ingress_packet_tokens < 1.0 {
+                            if flow.is_some() { recv_limited += 1; }
                             continue;
                         }
                         ingress_tokens -= size as f64;
                         ingress_packet_tokens -= 1.0;
                         let reply_port = guest_port.unwrap_or(source.port());
+                        if flow.is_some() { last_present = Some((guest_source, reply_port)); }
                         match inbound.try_send((guest_source, reply_port, buffer[..size].to_vec())) {
-                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {},
+                            Ok(()) => { if flow.is_some() { inbound_ok += 1; } },
+                            Err(mpsc::TrySendError::Full(_)) => { if flow.is_some() { inbound_full += 1; } },
                             Err(mpsc::TrySendError::Disconnected(_)) => return,
                         }
                     }
@@ -939,7 +980,10 @@ impl Core {
                     })
                     .is_ok()
                 {
+                    if let Some(flow) = &session.flow { flow.queued.fetch_add(1, Ordering::Relaxed); }
                     delivered = true;
+                } else if let Some(flow) = &session.flow {
+                    flow.queue_drop.fetch_add(1, Ordering::Relaxed);
                 }
             }
             hosted_diag(format_args!(
@@ -1065,8 +1109,11 @@ impl Core {
                         .try_send(Outbound { target: Target::HostedAddr(addr), packet: payload.to_vec() })
                         .is_ok()
                     {
+                        if let Some(flow) = &session.flow { flow.queued.fetch_add(1, Ordering::Relaxed); }
                         session.last_activity = now;
                         delivered = true;
+                    } else if let Some(flow) = &session.flow {
+                        flow.queue_drop.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 hosted_diag(format_args!(
@@ -1078,8 +1125,10 @@ impl Core {
 
             if let Some(session) = spy.sessions.get_mut(&key) {
                 if session.outbound.try_send(Outbound { target, packet: payload.to_vec() }).is_ok() {
+                    if let Some(flow) = &session.flow { flow.queued.fetch_add(1, Ordering::Relaxed); }
                     session.last_activity = now;
                 } else {
+                    if let Some(flow) = &session.flow { flow.queue_drop.fetch_add(1, Ordering::Relaxed); }
                     trace(format_args!("outbound queue unavailable for {from:08x}:{sport}"));
                 }
                 return true;
@@ -1108,6 +1157,8 @@ impl Core {
             let stop = Arc::new(AtomicBool::new(false));
             let worker_stop = stop.clone();
             let hosting = spy.hosting.entry(from).or_insert_with(|| Arc::new(AtomicBool::new(false))).clone();
+            let flow = std::env::var_os("FO2_SPY_UDP_TRACE").map(|_| Arc::new(FlowCounts::default()));
+            let worker_flow = flow.clone();
             let socket = match spy.bind_udp_socket() {
                 Some(socket) => socket,
                 None => {
@@ -1119,7 +1170,7 @@ impl Core {
             };
             if thread::Builder::new()
                 .name(format!("spy-udp-{from:08x}-{sport}"))
-                .spawn(move || worker(socket, targets, peer_map, outbound_rx, inbound_tx, public_target, worker_stop, hosting))
+                .spawn(move || worker(socket, targets, peer_map, outbound_rx, inbound_tx, public_target, worker_stop, hosting, worker_flow, key))
                 .is_err()
             {
                 trace(format_args!("worker spawn failed for {from:08x}:{sport}"));
@@ -1127,6 +1178,7 @@ impl Core {
             }
 
             let _ = outbound_tx.try_send(Outbound { target, packet: payload.to_vec() });
+            if let Some(flow) = &flow { flow.queued.fetch_add(1, Ordering::Relaxed); }
             spy.sessions.insert(
                 key,
                 Session {
@@ -1134,6 +1186,7 @@ impl Core {
                     inbound: inbound_rx,
                     last_activity: now,
                     stop,
+                    flow,
                 },
             );
             spy.timer.is_none()
@@ -1516,6 +1569,107 @@ mod tests {
             decoy.recv_from(&mut buf),
             Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
         ));
+    }
+
+    #[test]
+    fn alternating_public_and_private_sends_to_one_endpoint_keep_their_reply_presentations() {
+        // The fallback target stands in for the public peer's reachable socket;
+        // a non-loopback advertised endpoint is required because the test hook
+        // substitutes only the network destination, not the address presented
+        // back to the game.
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let peer_addr = match peer.local_addr().unwrap() {
+            SocketAddr::V4(addr) => addr,
+            _ => unreachable!(),
+        };
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        let public_ip = Ipv4Addr::new(212, 47, 146, 210);
+        let public = SocketAddrV4::new(public_ip, 5571);
+        let private = v4("192.168.200.30:23756");
+        core.spy_udp.public_target = Some(peer_addr);
+        core.spy_udp.lan_ip_test = Some(Ipv4Addr::new(192, 168, 100, 50));
+
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| {
+            out.lock().push(frame.to_vec());
+            SendResult::Sent
+        }));
+        let vip = 0x0a4d_0002;
+        let guest_port = 50123;
+
+        for (payload, destination, port, cid, expected_source, mapped_port) in [
+            (b"public".as_slice(), crate::VHOST_VIP, public.port(), u32::from(public_ip), public_ip, None),
+            (b"private".as_slice(), crate::VHOST_VIP, private.port(), u32::from(*private.ip()), *private.ip(), Some(private.port())),
+            (b"public-again".as_slice(), crate::VHOST_VIP, public.port(), u32::from(public_ip), public_ip, None),
+        ] {
+            assert!(core.spy_udp_send(vip, guest_port, destination, port, cid, payload));
+            let mut buf = [0u8; 128];
+            let (n, from) = peer.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], payload);
+            peer.send_to(b"answer", from).unwrap();
+
+            let frame = wait_frame(&mut core, &sent, |frame| &frame[24..] == b"answer");
+            assert_eq!(&frame[4..8], &u32::from(expected_source).to_be_bytes());
+            assert_eq!(&frame[8..12], &vip.to_be_bytes());
+            let presented_port = mapped_port.unwrap_or(peer_addr.port());
+            assert_eq!(&frame[12..14], &presented_port.to_be_bytes());
+            assert_eq!(&frame[14..16], &guest_port.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn private_destination_with_different_port_uses_mapped_reply_identity() {
+        let actual = UdpSocket::bind("127.0.0.1:0").unwrap();
+        actual.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let actual_addr = match actual.local_addr().unwrap() {
+            SocketAddr::V4(addr) => addr,
+            _ => unreachable!(),
+        };
+        let t = Rc::new(Cell::new(0.0));
+        let mut core = test_core(&t);
+        let public_ip = Ipv4Addr::new(212, 47, 146, 210);
+        let public_port = 5571;
+        let private_port = 23756;
+        core.spy_udp.public_target = Some(actual_addr);
+        core.spy_udp.lan_ip_test = Some(Ipv4Addr::new(192, 168, 100, 50));
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let out = sent.clone();
+        core.attach(Arc::new(move |_, frame, _| {
+            out.lock().push(frame.to_vec());
+            SendResult::Sent
+        }));
+
+        let vip = 0x0a4d_0002;
+        let guest_port = 50123;
+        // This public send negotiates/remembers the public peer endpoint.
+        assert!(core.spy_udp_send(
+            vip, guest_port, crate::VHOST_VIP, public_port, u32::from(public_ip), b"negotiate",
+        ));
+        let mut buf = [0u8; 128];
+        let (n, from) = actual.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"negotiate");
+        assert_eq!(core.spy_udp.last_public.get(&vip), Some(&SocketAddrV4::new(public_ip, public_port)));
+
+        // The game's private destination has a different port. Current mapping
+        // uses the mapped path, while the reply is presented at the private
+        // IP:port dialed. The test hook overrides the actual remote endpoint,
+        // so this test alone cannot establish which public port would be used.
+        assert!(core.spy_udp_send(
+            vip, guest_port, crate::VHOST_VIP, private_port,
+            u32::from(Ipv4Addr::new(192, 168, 200, 30)), b"private-port",
+        ));
+        let (n, routed_from) = actual.recv_from(&mut buf).unwrap();
+        assert_eq!(routed_from, from);
+        assert_eq!(&buf[..n], b"private-port");
+        actual.send_to(b"mapped-answer", routed_from).unwrap();
+
+        let frame = wait_frame(&mut core, &sent, |frame| &frame[24..] == b"mapped-answer");
+        assert_eq!(&frame[4..8], &u32::from(Ipv4Addr::new(192, 168, 200, 30)).to_be_bytes());
+        assert_eq!(&frame[12..14], &private_port.to_be_bytes());
+
     }
 
     #[test]
