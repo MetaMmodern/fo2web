@@ -1,0 +1,39 @@
+
+# In .env next to this file (or the environment):
+#   FLATOUT_IMAGE=ghcr.io/<owner>/<repo>-rs:sha-<commit>   the GHCR image (the server + frontend)
+#   PROD_HOST=flatout.example.com                         the HTTPS name Traefik will route
+#   FLATOUT_GAME=/srv/flatout/game                         the game folder (read-only)
+#   FLATOUT_MODULE=/srv/flatout/module                     nfsu2.wasm + nfsu2.json (read-only)
+#   FLATOUT_STATE_PROD=/srv/flatout/state-prod             writable production state folder
+#   NFSU2_WASM=/module/releases/<id>/nfsu2.wasm            the staged module (default /module/nfsu2.wasm)
+# then:  docker compose -f compose.flatout.prod.yml up -d
+name: flatout-prod
+services:
+  server:
+    image: ${FLATOUT_IMAGE:?set FLATOUT_IMAGE in .env (ghcr.io/<owner>/<repo>-rs:sha-<commit>)}
+    restart: unless-stopped
+    network_mode: host
+    command: ["--behind-proxy", "--spy-relay"]
+    environment:
+      FO2_SPY_UDP_TRACE: "0"
+      # The production name Traefik serves; the server answers only for its own names.
+      NFSU2_HOST: ${PROD_HOST:?set PROD_HOST in .env (flatout.example.com)}
+      # reachable from the host's address so Traefik (host.docker.internal) can reach it
+      NFSU2_HTTP_BIND: 0.0.0.0
+      NFSU2_HTTP_PORT: "18081"
+      NFSU2_SPY_UDP_PORTS: "28100-28355"
+      NFSU2_DATA: /game
+      NFSU2_STATE: /state
+      # Online mode is required for the relay.
+      NFSU2_ONLINE: "on"
+      NFSU2_ROAM_HUB: "off"
+      NFSU2_WASM: ${NFSU2_WASM:-/module/nfsu2.wasm}
+    volumes:
+      - ${FLATOUT_GAME:-/srv/flatout/game}:/game:ro
+      - ${FLATOUT_MODULE:-/srv/flatout/module}:/module:ro
+      - ${FLATOUT_STATE_PROD:-/srv/flatout/state-prod}:/state
+    # as in the inherited NFS compose: nothing writable but /state, no capabilities, no swap
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: { driver: local }

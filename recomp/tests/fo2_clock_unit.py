@@ -73,6 +73,7 @@ static void reset_clock(void){
     atomic_store(&g_vclock_creep, 0ull);
     atomic_store(&g_real_base, 0ull);
     atomic_store(&g_vclock_polls, 0u);
+    atomic_store(&g_vclock_wait_elapsed, 0ull);
     atomic_store(&g_vclock_freeze, 0ull);
     atomic_store(&g_vt_last, 0ull);
     atomic_store(&g_rt_start, 0ull);
@@ -279,6 +280,42 @@ static void scenario_sleep_advances_clock(void){
     CHECK(host_qpc() >= after_yield, "clock resumes after the freeze");
 }
 
+/* A sleep rebases the real clock inside a frame. The frame floor must apply
+ * to the whole frame, not again to the short remainder after that rebase. */
+static void scenario_sleep_before_present(void){
+    reset_clock();
+    g_sim_us = 1792000000000000ull;
+    host_qpc();
+    uint64_t start = host_qpc();
+    for (int i = 0; i < 100; i++){
+        g_sim_us += 9000ull;
+        vclock_advance_wait();
+        g_sim_us += 1000ull;
+        vclock_tick();
+    }
+    uint64_t elapsed = host_qpc() - start;
+    CHECK(elapsed >= 999000ull && elapsed <= 1001000ull,
+          "sleep followed by present must not add the frame floor twice");
+
+    /* Multiple short sleeps and an immediate Present still get one 4 ms
+     * minimum for the whole frame, not one minimum after the last sleep. */
+    reset_clock();
+    g_sim_us = 1792000000000000ull;
+    start = host_qpc();
+    g_sim_us += 1000ull; vclock_advance_wait();
+    g_sim_us += 1000ull; vclock_advance_wait();
+    vclock_tick();
+    CHECK(host_qpc() - start == 4000ull,
+          "multiple sleeps and immediate present apply one full-frame floor");
+
+    /* No sleep: preserve the original floor on genuinely fast frames. */
+    reset_clock();
+    g_sim_us = 1792000000000000ull;
+    start = host_qpc();
+    g_sim_us += 1000ull; vclock_tick();
+    CHECK(host_qpc() - start == 4000ull, "fast frame still has its floor");
+}
+
 int main(void){
     scenario_plain_first_qpc();
     scenario_epoch_anchor();
@@ -287,6 +324,7 @@ int main(void){
     scenario_freeze();
     scenario_legacy_rebase();
     scenario_sleep_advances_clock();
+    scenario_sleep_before_present();
     if (g_fail){
         fprintf(stderr, "\n%d clock check(s) FAILED\n", g_fail);
         return 1;

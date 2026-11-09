@@ -118,6 +118,9 @@ static _Atomic uint64_t g_vclock_base  = 0;   /* virtual time at frame start */
 static _Atomic uint64_t g_vclock_creep = 0;   /* busy-wait compensation     */
 static _Atomic uint64_t g_real_base    = 0;   /* real time of that frame    */
 static _Atomic uint32_t g_vclock_polls = 0;
+#ifdef FLATOUT2
+static _Atomic uint64_t g_vclock_wait_elapsed = 0; /* real frame time already committed by sleeps */
+#endif
 
 #ifdef __wasm__
 #include "web/host_abi.h"
@@ -157,6 +160,9 @@ void vclock_report(void){
 void vclock_tick(void){
     uint64_t cr = atomic_exchange(&g_vclock_creep, 0ull);
     uint64_t now = real_us();
+#ifdef FLATOUT2
+    uint64_t waited = atomic_exchange(&g_vclock_wait_elapsed, 0ull);
+#endif
     /* Per-frame advance.
      *   VCLOCK=fixed : exactly 16.667 ms per frame (old behaviour).  When the
      *                  emulator drops below 60 fps the GAME RUNS IN SLOW
@@ -174,12 +180,21 @@ void vclock_tick(void){
                   m = (e && *e == 'f') ? 0 : 1; atomic_store(&mode, m); }
       uint64_t rb = atomic_load(&g_real_base);
       uint64_t step = 16667ull;
-      if (m && rb && now > rb){
+       if (m && rb && (now > rb
+#ifdef FLATOUT2
+                       || now == rb
+#endif
+                       )){
           step = now - rb;
           /* above 250 fps: clamp.  The floor is 4 ms up to 120 fps content and
            * lower for 240 / uncapped (framerate.c), where frames routinely
            * come in under 4 ms. */
           { uint64_t hfr_vclock_floor_us(void); uint64_t fl = hfr_vclock_floor_us();
+#ifdef FLATOUT2
+            /* Sleep already committed part of this frame. Apply the floor to
+             * the full frame, not again to its short post-sleep remainder. */
+            fl = waited < fl ? fl - waited : 0;
+#endif
             if (step < fl) step = fl; }
           if (step > 50000ull) step = 50000ull;   /* huge dt -> catch-up loop */
       }
@@ -312,6 +327,7 @@ void vclock_advance_wait(void){
     uint64_t add = now - rb;
     uint64_t cr  = atomic_exchange(&g_vclock_creep, 0ull);
     atomic_fetch_add(&g_vclock_base, add + cr);
+    atomic_fetch_add(&g_vclock_wait_elapsed, add);
     atomic_store(&g_real_base, now);
     atomic_store(&g_vclock_polls, 0);
 #endif
