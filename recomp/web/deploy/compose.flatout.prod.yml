@@ -1,12 +1,13 @@
 
-# In .env next to this file (or the environment):
+# Configure these environment variables in Coolify for its Raw Compose deployment:
 #   FLATOUT_IMAGE=ghcr.io/<owner>/<repo>-rs:sha-<commit>   the GHCR image (the server + frontend)
 #   PROD_HOST=flatout.example.com                         the HTTPS name Traefik will route
 #   FLATOUT_GAME=/srv/flatout/game                         the game folder (read-only)
 #   FLATOUT_MODULE=/srv/flatout/module                     nfsu2.wasm + nfsu2.json (read-only)
 #   FLATOUT_STATE_PROD=/srv/flatout/state-prod             writable production state folder
 #   NFSU2_WASM=/module/releases/<id>/nfsu2.wasm            the staged module (default /module/nfsu2.wasm)
-# then:  docker compose -f compose.flatout.prod.yml up -d
+# Coolify provides routing separately; this compose file intentionally has no
+# Traefik labels or proxy service.
 name: flatout-prod
 services:
   server:
@@ -20,7 +21,7 @@ services:
       NFSU2_HOST: ${PROD_HOST:?set PROD_HOST in .env (flatout.example.com)}
       # reachable from the host's address so Traefik (host.docker.internal) can reach it
       NFSU2_HTTP_BIND: 0.0.0.0
-      NFSU2_HTTP_PORT: "18081"
+      NFSU2_HTTP_PORT: "18082"
       NFSU2_SPY_UDP_PORTS: "28100-28355"
       NFSU2_DATA: /game
       NFSU2_STATE: /state
