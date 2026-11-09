@@ -3,7 +3,7 @@
 # This is a companion to FLATOUT_COOLIFY.md.  The production app is a Coolify "Docker Image"
 # resource on the bridge network; that cannot reach the relay's UDP, so the eventual
 # production move is to host networking.  This file is a throwaway host-networked instance to
-# prove the network path first, with the relay still OFF (HTTP only), on its own state folder,
+# prove the host-network relay path first, on its own state folder,
 # so the live production container and Graphito are untouched.
 #
 # It deliberately has NO Caddy and NO proxy of its own: Coolify's Traefik stays the HTTPS
@@ -13,7 +13,7 @@
 # network_mode: host shares the VPS's network namespace, so:
 #   - the server's 0.0.0.0:18081 is reachable at the host's address (and host.docker.internal),
 #     which is how Traefik reaches it;
-#   - later, the relay's UDP sockets bind straight to the VPS's public IP (the whole point).
+#   - the relay's UDP sockets bind straight to the VPS's public IP.
 # Because it is host network, 18081 is also reachable from the Internet unless the firewall
 # blocks it: block 18081/tcp inbound for the duration of this test.
 #
@@ -32,21 +32,21 @@ services:
     image: ${FLATOUT_IMAGE:?set FLATOUT_IMAGE in .env (ghcr.io/<owner>/<repo>-rs:sha-<commit>)}
     restart: unless-stopped
     network_mode: host
-    command: ["--behind-proxy"]
+    command: ["--behind-proxy", "--spy-relay"]
     environment:
+      FO2_SPY_UDP_TRACE: "0"
       # the staging name Traefik serves; the server answers only for its own names
       NFSU2_HOST: ${STAGING_HOST:?set STAGING_HOST in .env (staging.example.com)}
       # reachable from the host's address so Traefik (host.docker.internal) can reach it
       NFSU2_HTTP_BIND: 0.0.0.0
       NFSU2_HTTP_PORT: "18081"
+      NFSU2_SPY_UDP_PORTS: "28100-28355"
       NFSU2_DATA: /game
       NFSU2_STATE: /state
-      # online=on is required for the relay (which is OFF for this HTTP test, but keep it on
-      # to match the eventual production config)
+      # Online mode is required for the relay.
       NFSU2_ONLINE: "on"
       NFSU2_ROAM_HUB: "off"
       NFSU2_WASM: ${NFSU2_WASM:-/module/nfsu2.wasm}
-      # the relay stays OFF for the initial HTTP test: no --spy-relay, and NFSU2_SPY_RELAY unset
     volumes:
       - ${FLATOUT_GAME:-/srv/flatout/game}:/game:ro
       - ${FLATOUT_MODULE:-/srv/flatout/module}:/module:ro
