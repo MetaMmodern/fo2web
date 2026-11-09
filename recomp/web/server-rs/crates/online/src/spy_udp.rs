@@ -57,6 +57,19 @@ fn hosted_diag(args: std::fmt::Arguments<'_>) {
     }
 }
 
+/// The game (join/race) datagrams a browser sends, with the peer and resolved
+/// destination.  Its own budget: the host's inbound flood otherwise consumes the
+/// general trace before these are seen, and a per-(dest,port,peer) log line hides
+/// repeated sends.
+fn trace_game(args: std::fmt::Arguments<'_>) {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if std::env::var_os("FO2_SPY_UDP_TRACE").is_some()
+        && COUNT.fetch_add(1, Ordering::Relaxed) < 80
+    {
+        eprintln!("spy-udp-trace: game {args}");
+    }
+}
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct SessionKey {
     guest_vip: u32,
@@ -988,6 +1001,15 @@ impl Core {
                 Target::HostedAddr(addr) => format!("client:{addr}"),
                 Target::Mapped { remote, present } => format!("{remote} as {present}"),
             };
+            // The game's own sends, with its peer and resolved destination, once
+            // per call (a small separate budget): this shows whether a guest is
+            // replying to the peer at all, and to which address.
+            if !matches!(target, Target::Nat(_)) {
+                trace_game(format_args!(
+                    "{from:08x}:{sport} -> {dest:08x}:{dport} cid={cid:08x} ({}) {describe}",
+                    payload.len()
+                ));
+            }
             let seen = (dest, dport, cid);
             if self.spy_udp.logged.insert(seen) {
                 (self.log)(
