@@ -135,6 +135,11 @@ pub struct SpyUdp {
     hosting: HashMap<u32, Arc<AtomicBool>>,
     /// The worker sockets' port range (`low-high`); None: bind ephemeral, as before.
     udp_ports: Option<(u16, u16)>,
+    /// Next candidate in the pinned relay range.  A new browser session must
+    /// not immediately inherit a just-closed session's public UDP identity:
+    /// FlatOut keeps the old peer state under that IP:port.  Rotate rather
+    /// than always reusing the lowest port.
+    next_udp_port: Option<u16>,
     /// The relay host's own LAN address (computed once): a private destination on
     /// this /24 is reachable and is sent straight to it; any other private
     /// destination is a peer's LAN address and must be translated to its public
@@ -174,6 +179,7 @@ impl SpyUdp {
             sessions: HashMap::new(),
             hosting: HashMap::new(),
             udp_ports,
+            next_udp_port: udp_ports.map(|(low, _)| low),
             lan_ip: lan_ip(),
             #[cfg(test)]
             lan_ip_test: None,
@@ -193,15 +199,26 @@ impl SpyUdp {
         lan.map_or(false, |l| l.octets()[..3] == ip.octets()[..3])
     }
 
-    /// The worker's externally reachable UDP socket.  When a range is set, bind the first free port of it so the
-    /// firewall can allow exactly that range; the port is freed when the worker drops the socket.  None: every port
-    /// of the range is taken.
-    fn bind_udp_socket(&self) -> Option<UdpSocket> {
+    /// The worker's externally reachable UDP socket.  A pinned range remains
+    /// firewall-friendly, while round-robin allocation prevents immediate
+    /// identity reuse after a browser reload.
+    fn bind_udp_socket(&mut self) -> Option<UdpSocket> {
         let socket = match self.udp_ports {
             None => UdpSocket::bind("0.0.0.0:0").ok(),
-            Some((low, high)) => (low..=high).find_map(|port| {
-                UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).ok()
-            }),
+            Some((low, high)) => {
+                let first = self.next_udp_port.unwrap_or(low).clamp(low, high);
+                let span = u32::from(high) - u32::from(low) + 1;
+                let mut bound = None;
+                for offset in 0..span {
+                    let port = low + ((u32::from(first - low) + offset) % span) as u16;
+                    if let Ok(socket) = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)) {
+                        self.next_udp_port = Some(if port == high { low } else { port + 1 });
+                        bound = Some(socket);
+                        break;
+                    }
+                }
+                bound
+            }
         };
         let socket = socket?;
         socket.set_nonblocking(true).ok()?;
@@ -1341,7 +1358,7 @@ mod tests {
         drop(probe);
 
         // A single-port range: the first bind takes it, the next finds none.
-        let spy = SpyUdp::new(true, Some((port, port)));
+        let mut spy = SpyUdp::new(true, Some((port, port)));
         let first = spy.bind_udp_socket().expect("the port is free");
         assert_eq!(first.local_addr().unwrap().port(), port);
         assert!(spy.bind_udp_socket().is_none(), "the range is exhausted");
@@ -1353,7 +1370,7 @@ mod tests {
         drop(again);
 
         // Without a range the socket binds ephemerally (a nonzero port).
-        let ephemeral = SpyUdp::new(true, None);
+        let mut ephemeral = SpyUdp::new(true, None);
         let sock = ephemeral.bind_udp_socket().expect("ephemeral bind");
         assert_ne!(sock.local_addr().unwrap().port(), 0);
     }
