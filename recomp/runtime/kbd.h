@@ -17,6 +17,10 @@ void kbd_set_key(int src, unsigned dik, int down);       /* any thread */
 void kbd_release_source(int src);                        /* every key of src up */
 void kbd_state(uint8_t *dst, unsigned n);                /* 0x80 = down */
 int  kbd_key_down(unsigned dik);
+/* Win32 virtual-key view of the physical state.  Values use the Windows
+ * convention: bit 7 means currently down. */
+void kbd_virtual_state(uint8_t state[256]);
+int  kbd_virtual_key_down(unsigned vk);
 
 typedef struct { uint8_t dik, down; uint32_t ms, seq; } KbdEv;
 uint32_t kbd_ev_head(void);                  /* sequence number of the next event */

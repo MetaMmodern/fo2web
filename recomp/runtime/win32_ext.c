@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <sys/mount.h>
 #include <stddef.h>
+#include "kbd.h"
 
 void dispatch_indirect(CPU*,uint32_t);
 void mem_commit(uint32_t,uint32_t);
@@ -677,8 +678,38 @@ static int g_wmq_head = 0, g_wmq_tail = 0;
 static int g_wm_activated = 0;
 uint64_t g_wm_sent = 0, g_wm_dispatched = 0;
 void lifecycle_pump(void); int lifecycle_may_park(void);           /* lifecycle.c */
-void kbd_pump(void);                                               /* keyboard.c */
 void win32_keyboard_hook_message(CPU*, uint32_t, uint32_t, uint32_t);
+
+/* FlatOut's profile editor and online chat translate the keyboard hook's
+ * virtual keys themselves through ToAscii/ToUnicode.  They do not consume the
+ * WM_CHAR events used by the ordinary menu controls. */
+static int key_ascii(uint32_t vk, const uint8_t *state, uint8_t *out){
+    int shift = state && (state[0x10] & 0x80u);
+    int caps = state && (state[0x14] & 1u);
+    if (vk >= 'A' && vk <= 'Z'){
+        *out = (uint8_t)((shift ^ caps) ? vk : vk + ('a' - 'A'));
+        return 1;
+    }
+    if (vk >= '0' && vk <= '9'){
+        static const char shifted[] = ")!@#$%^&*(";
+        *out = (uint8_t)(shift ? shifted[vk - '0'] : vk); return 1;
+    }
+    switch (vk){
+    case 0x08: case 0x09: case 0x0D: case 0x1B: case 0x20: *out = (uint8_t)vk; return 1;
+    case 0xBA: *out = (uint8_t)(shift ? ':' : ';'); return 1;
+    case 0xBB: *out = (uint8_t)(shift ? '+' : '='); return 1;
+    case 0xBC: *out = (uint8_t)(shift ? '<' : ','); return 1;
+    case 0xBD: *out = (uint8_t)(shift ? '_' : '-'); return 1;
+    case 0xBE: *out = (uint8_t)(shift ? '>' : '.'); return 1;
+    case 0xBF: *out = (uint8_t)(shift ? '?' : '/'); return 1;
+    case 0xC0: *out = (uint8_t)(shift ? '~' : '`'); return 1;
+    case 0xDB: *out = (uint8_t)(shift ? '{' : '['); return 1;
+    case 0xDC: *out = (uint8_t)(shift ? '|' : '\\'); return 1;
+    case 0xDD: *out = (uint8_t)(shift ? '}' : ']'); return 1;
+    case 0xDE: *out = (uint8_t)(shift ? '"' : '\''); return 1;
+    default: return 0;
+    }
+}
 
 static void wm_push(uint32_t m, uint32_t wp, uint32_t lp){
     int nx = (g_wmq_tail + 1) % WMQ;
@@ -1549,8 +1580,28 @@ int win32_ext_call(CPU *c, const char *n, uint32_t *out){
            ||!strcmp(n,"SendMessageA")||!strcmp(n,"PostQuitMessage")) r=0;
     else if (!strcmp(n,"ReleaseCapture")||!strcmp(n,"SetCapture")) r=1;
     else if (!strcmp(n,"IsIconic")) r=0;
-    else if (!strcmp(n,"GetKeyboardState")){ uint32_t p=A(c,0); if(p){mem_commit(p,256);memset(g_mem+p,0,256);} r=1; }
-    else if (!strcmp(n,"GetAsyncKeyState")) r=0;
+    else if (!strcmp(n,"GetKeyboardState")){
+        uint32_t p=A(c,0);
+        if(p){ mem_commit(p,256); kbd_virtual_state(g_mem+p); }
+        r=1;
+    }
+    else if (!strcmp(n,"GetAsyncKeyState"))
+        r = kbd_virtual_key_down(A(c,0)) ? 0x8000u : 0u;
+    else if (!strcmp(n,"GetKeyState"))
+        r = kbd_virtual_key_down(A(c,0)) ? 0x8000u : 0u;
+    else if (!strcmp(n,"GetKeyboardLayout")) r = 0x0409u; /* US English */
+    else if (!strcmp(n,"ToAscii")){
+        uint8_t ch, *state = A(c,2) && mem_is_committed(A(c,2) + 255u) ? g_mem + A(c,2) : 0;
+        uint32_t out = A(c,3);
+        if (key_ascii(A(c,0), state, &ch) && out && mem_is_committed(out)){ MR16(out) = ch; r = 1; }
+        else r = 0;
+    }
+    else if (!strcmp(n,"ToUnicode")){
+        uint8_t ch, *state = A(c,2) && mem_is_committed(A(c,2) + 255u) ? g_mem + A(c,2) : 0;
+        uint32_t out = A(c,3), nout = A(c,4);
+        if (key_ascii(A(c,0), state, &ch) && out && nout && mem_is_committed(out + 1u)){ MR16(out) = ch; r = 1; }
+        else r = 0;
+    }
     /* --- synchronization --- */
     else if (!strcmp(n,"CreateEventA")){
         uint32_t h=obj_new(OB_EVENT); Obj*o=obj_get(h);

@@ -89,6 +89,50 @@ int kbd_key_down(unsigned dik){
     pthread_mutex_unlock(&g_kmx);
     return d;
 }
+
+/* DirectInput scan code to the virtual key exposed by GetKeyboardState and
+ * GetAsyncKeyState.  Text widgets in FlatOut poll these APIs rather than the
+ * DirectInput device used by driving controls. */
+static unsigned dik_virtual_key(unsigned dik){
+    static const uint8_t digit[] = { 0x0B, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A };
+    static const uint8_t letter[] = {
+        0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+        0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C
+    };
+    for (unsigned i = 0; i < sizeof digit; i++) if (dik == digit[i]) return '0' + i;
+    for (unsigned i = 0; i < sizeof letter; i++) if (dik == letter[i]) return 'A' + i;
+    switch (dik){
+    case 0x01: return 0x1B; case 0x0E: return 0x08; case 0x0F: return 0x09;
+    case 0x1C: case 0x9C: return 0x0D; case 0x39: return 0x20;
+    case 0x2A: return 0xA0; case 0x36: return 0xA1;
+    case 0x1D: return 0xA2; case 0x9D: return 0xA3;
+    case 0x38: return 0xA4; case 0xB8: return 0xA5;
+    case 0x3A: return 0x14;
+    case 0xCB: return 0x25; case 0xC8: return 0x26; case 0xCD: return 0x27; case 0xD0: return 0x28;
+    case 0xC7: return 0x24; case 0xCF: return 0x23; case 0xC9: return 0x21; case 0xD1: return 0x22;
+    case 0xD2: return 0x2D; case 0xD3: return 0x2E;
+    default: return 0;
+    }
+}
+void kbd_virtual_state(uint8_t state[256]){
+    memset(state, 0, 256);
+    pthread_mutex_lock(&g_kmx);
+    for (unsigned dik = 1; dik < 256; dik++) if (g_src[dik]){
+        unsigned vk = dik_virtual_key(dik);
+        if (vk) state[vk] = 0x80;
+    }
+    pthread_mutex_unlock(&g_kmx);
+    /* Windows reports both the side-specific and generic modifier keys. */
+    if (state[0xA0] || state[0xA1]) state[0x10] = 0x80;
+    if (state[0xA2] || state[0xA3]) state[0x11] = 0x80;
+    if (state[0xA4] || state[0xA5]) state[0x12] = 0x80;
+}
+int kbd_virtual_key_down(unsigned vk){
+    uint8_t state[256];
+    if (vk > 255u) return 0;
+    kbd_virtual_state(state);
+    return state[vk] != 0;
+}
 uint32_t kbd_ev_head(void){
     pthread_mutex_lock(&g_kmx);
     uint32_t s = g_seq;
