@@ -27,7 +27,18 @@ jobs:
           file: recomp/web/server-rs/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+          tags: |
+            ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=flatout-image
           cache-to: type=gha,mode=max,scope=flatout-image
+      - name: Deploy production to Coolify
+        run: |
+          curl --fail --show-error \
+            --request POST \
+            "$COOLIFY_DEPLOY_WEBHOOK" \
+            --header "Authorization: Bearer $COOLIFY_TOKEN"
+        env:
+          COOLIFY_DEPLOY_WEBHOOK: ${{ secrets.COOLIFY_DEPLOY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
