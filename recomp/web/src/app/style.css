@@ -835,3 +835,71 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.64); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* FlatOut 2 web port: a compact, trackside shell with flame, tyre and chequered-flag cues. */
+:root {
+  --bg: #090a0c;
+  --frame: #181818;
+  --panel: rgba(26, 27, 29, .94);
+  --field: #0e0f10;
+  --line: #4a4a46;
+  --edge: #858078;
+  --text: #f7f3eb;
+  --muted: #beb8ad;
+  --lime: #ff5a1f;
+  --lime-fill: #512718;
+  --lime-glow: rgba(255, 90, 31, .45);
+  --bad: #ff8a80;
+  --warn: #ffc04d;
+  --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body {
+  background:
+    radial-gradient(900px 500px at 15% -10%, rgba(238, 75, 22, .25), transparent 62%),
+    radial-gradient(700px 500px at 100% 100%, rgba(246, 180, 40, .1), transparent 70%),
+    linear-gradient(135deg, #101114, var(--bg) 52%, #12100d);
+}
+body::before {
+  content: ""; position: fixed; z-index: -1; inset: 0; opacity: .09; pointer-events: none;
+  background-image: linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%), linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%);
+  background-position: 0 0, 20px 20px; background-size: 40px 40px;
+  mask-image: linear-gradient(to bottom, #000, transparent 40%);
+}
+.app { max-width: 1280px; grid-template-columns: minmax(360px, .86fr) minmax(0, 1.14fr); gap: 20px; padding: 20px 28px 56px; }
+.top {
+  position: relative; overflow: hidden; padding: 22px 26px 20px; border: 1px solid rgba(255,255,255,.12); border-radius: 4px;
+  background: linear-gradient(105deg, rgba(40, 38, 34, .98), rgba(20, 20, 21, .98));
+  box-shadow: 0 18px 52px rgba(0,0,0,.35);
+}
+.top::after { content: ""; position: absolute; right: -10%; bottom: 0; width: 52%; height: 7px; background: repeating-conic-gradient(#eee 0 25%, #202020 0 50%) 0 / 22px 22px; opacity: .7; }
+h1, h2, h3, .status, .btn, .play, kbd, .tab, .set-label, .opt, .val, summary, .profiles .name, .problems strong, .hud-fps {
+  font-style: normal; font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif; font-weight: 700; letter-spacing: .045em;
+}
+h1 { font-size: clamp(34px, 5vw, 54px); line-height: .9; text-transform: uppercase; text-shadow: 3px 3px 0 #000; }
+.brand-mark { display: block; margin-top: 7px; color: var(--lime); font: 700 12px/1 var(--font); letter-spacing: .3em; }
+.top-end { padding-bottom: 5px; }
+.top-end .hint { max-width: 310px; color: #d7d1c6; text-align: right; }
+.bar { height: 6px; border-radius: 0; background: #050505; }
+.bar-fill { background: linear-gradient(90deg, #e63017, #ff9d24); box-shadow: 0 0 12px var(--lime-glow); }
+.side, .content { gap: 20px; }
+.panel { position: relative; overflow: hidden; padding: 24px; border: 1px solid rgba(255,255,255,.1); border-radius: 4px; background: linear-gradient(145deg, rgba(39,40,42,.96), rgba(22,23,24,.96)); box-shadow: 0 12px 30px rgba(0,0,0,.2); }
+.panel::before { content: ""; display: block; width: 46px; height: 4px; margin: -24px 0 20px -24px; background: var(--lime); box-shadow: 0 0 14px var(--lime-glow); }
+h2 { color: #fff5e9; font-size: 23px; text-transform: uppercase; letter-spacing: .07em; }
+h3 { color: #ffc04d; }
+a { color: #ffad38; }
+.hero { padding: 30px 28px; background: linear-gradient(125deg, rgba(82, 29, 19, .96), rgba(35, 28, 25, .96) 52%, rgba(22,22,23,.97)); }
+.hero::after { content: ""; position: absolute; right: -46px; bottom: -46px; width: 145px; height: 145px; border: 18px solid rgba(255, 162, 31, .16); border-radius: 50%; box-shadow: inset 0 0 0 12px rgba(0,0,0,.22); }
+.status { font-size: clamp(34px, 4vw, 46px); line-height: 1; text-transform: uppercase; }
+body[data-phase="ready"] .status { color: #ffd25f; }
+.play, .btn { border-radius: 2px; text-transform: uppercase; letter-spacing: .06em; }
+.play { background: linear-gradient(135deg, #e43c1b, #ff7920); border-color: #ffbd4a; box-shadow: 0 5px 0 #6d1d10, 0 11px 24px rgba(0,0,0,.3); }
+.play:not(:disabled):hover { filter: brightness(1.12); transform: translateY(-1px); }
+.btn { border-color: #77736d; background: #292a2b; }
+.btn:hover:not(:disabled) { border-color: #ff9a2e; background: #3a302a; }
+.keys > div { border-color: rgba(255,255,255,.1); }
+kbd { color: #17120d; background: #f4ecdc; border-color: #fff; border-radius: 2px; box-shadow: 0 2px 0 #857a69; }
+.prose { max-width: 68ch; color: #ded9cf; }
+#changes .prose p:first-child { color: #fff4d8; font-size: 17px; line-height: 1.6; }
+#game-data { min-height: 180px; }
+@media (max-width: 959px) { .app { grid-template-columns: 1fr; padding: 16px 16px 42px; gap: 16px; } .top::after { width: 65%; } }
+@media (max-width: 559px) { .top, .panel { padding: 20px; } .panel::before { margin: -20px 0 16px -20px; } .top-end .hint { text-align: left; } }
