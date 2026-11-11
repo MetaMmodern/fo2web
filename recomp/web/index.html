@@ -4,21 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0d0d0d">
-<title>Underground 2 Revived</title>
-<meta name="description" content="Play Need for Speed: Underground 2 (2004) in Chrome and Firefox with WebGPU graphics, Web Audio, up to 120 fps widescreen, controller support, free roam and Online races with friends. Fan project, not affiliated with Electronic Arts.">
-<meta name="keywords" content="Need for Speed Underground 2, NFSU2, Underground 2 browser, play NFSU2 online, WebAssembly, WebGPU, free roam multiplayer, racing game">
-<meta name="application-name" content="Underground 2 Revived">
+<meta name="theme-color" content="#11100e">
+<title>FlatOut 2 — Web Port</title>
+<meta name="description" content="A fan-made web port of FlatOut 2. Play the original game in your browser. Fan project. Not affiliated with or endorsed by Bugbear Entertainment.">
+<meta name="keywords" content="FlatOut 2, FlatOut 2 web port, browser racing game, WebAssembly, WebGPU">
+<meta name="application-name" content="FlatOut 2 Web Port">
 <meta name="robots" content="index, follow">
 <meta name="google-adsense-account" content="ca-pub-5817610257612647">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Underground 2 Revived">
+<meta property="og:site_name" content="FlatOut 2 Web Port">
 <meta property="og:locale" content="en_US">
-<meta property="og:title" content="Underground 2 Revived">
-<meta property="og:description" content="Play Need for Speed: Underground 2 (2004) in Chrome and Firefox with WebGPU graphics, Web Audio, up to 120 fps widescreen, controller support, free roam and Online races with friends. Fan project, not affiliated with Electronic Arts.">
+<meta property="og:title" content="FlatOut 2 — Web Port">
+<meta property="og:description" content="A fan-made web port of FlatOut 2. Play the original game in your browser.">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:title" content="Underground 2 Revived">
-<meta name="twitter:description" content="Play Need for Speed: Underground 2 (2004) in Chrome and Firefox with WebGPU graphics, Web Audio, up to 120 fps widescreen, controller support, free roam and Online races with friends. Fan project, not affiliated with Electronic Arts.">
+<meta name="twitter:title" content="FlatOut 2 — Web Port">
+<meta name="twitter:description" content="A fan-made web port of FlatOut 2. Play the original game in your browser.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23171717'/%3E%3Crect x='5' y='5' width='22' height='22' rx='6' fill='%23404038' stroke='%23c8f088' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-180.png">
@@ -27,14 +27,13 @@
 {
   "@context": "https://schema.org",
   "@type": ["VideoGame", "WebApplication"],
-  "name": "Underground 2 Revived",
-  "alternateName": ["Need for Speed: Underground 2 in the browser", "NFSU2", "Need for Speed Underground 2"],
-  "description": "Need for Speed: Underground 2 (2004), recompiled to WebAssembly to run in Chrome and Firefox with WebGPU graphics, Web Audio, up to 120 fps widescreen, Xbox and PlayStation controller support, free roam and Online multiplayer.",
+  "name": "FlatOut 2 Web Port",
+  "description": "A fan-made browser port of FlatOut 2.",
   "applicationCategory": "GameApplication",
   "genre": "Racing",
   "gamePlatform": "Web browser",
   "operatingSystem": "Windows, macOS",
-  "playMode": ["SinglePlayer", "MultiPlayer", "CoOp"]
+  "playMode": "SinglePlayer"
 }
 </script>
 <script type="module" src="/main.js"></script>
@@ -44,11 +43,9 @@
 <main class="app" id="app">
   <header class="top">
     <div class="top-row">
-      <h1>Underground 2 Revived</h1>
+      <h1>FlatOut 2 <span class="brand-mark">WEB PORT</span></h1>
       <div class="top-end">
-        <p class="hint" data-i18n>Fan project. Not affiliated with or endorsed by Electronic Arts.</p>
-        <label class="lang-pick"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3C9.5 5.6 8.2 8.6 8.2 12s1.3 6.4 3.8 9"/></svg><select id="lang-pick" data-i18n-attr="aria-label" aria-label="Language"></select></label>
-        <a class="btn" href="https://discord.gg/25zXmQ2Ua9" target="_blank" rel="noopener noreferrer"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg>Discord</a>
+        <p class="hint" data-i18n>Fan project. Not affiliated with or endorsed by Bugbear Entertainment.</p>
       </div>
     </div>
     <div class="bar" id="progress" role="progressbar" data-i18n-attr="aria-label" aria-label="Game loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
@@ -67,7 +64,7 @@
         <button type="button" class="text-btn" id="log-btn" hidden data-i18n>Download log</button>
       </div>
       <p class="msg" id="lastgame" hidden></p>
-      <p class="msg" id="report" hidden data-i18n-html>Help get it fixed: download the log and post it in <a href="https://discord.gg/SSHm5g43gh"target="_blank" rel="noopener noreferrer">#bug-reports on our Discord</a>, with what you were doing when it happened.</p>
+      <p class="msg" id="report" hidden data-i18n-html>Help get it fixed: download the log and keep it with details of what you were doing when it happened.</p>
       <p class="msg" id="newer" aria-live="polite" hidden></p>
       <ul class="problems" id="problems" aria-live="polite"></ul>
       <p class="msg warn" id="override" hidden></p>
@@ -112,13 +109,7 @@
             <div><dt><kbd>Shift</kbd> <kbd data-i18n>Ctrl</kbd></dt><dd data-i18n>Shift up, shift down (manual)</dd></div>
             <div><dt><kbd>C</kbd> <kbd>B</kbd></dt><dd data-i18n>Change camera, look back</dd></div>
             <div><dt><kbd>R</kbd></dt><dd data-i18n>Respawn</dd></div>
-            <div><dt><kbd>H</kbd> <kbd>J</kbd></dt><dd data-i18n>Hydraulics (hold, then the arrows)</dd></div>
-            <div><dt><kbd>N</kbd></dt><dd data-i18n>Horn (with other players)</dd></div>
-            <div><dt><kbd>X</kbd></dt><dd data-i18n>Drift mode (in free roam)</dd></div>
-            <div><dt><kbd>1</kbd>–<kbd>4</kbd></dt><dd data-i18n>Quick chat (with other players): a group, then a phrase</dd></div>
-            <div><dt><kbd>Enter</kbd></dt><dd data-i18n>Start an event, take an outrun</dd></div>
-            <div><dt><kbd>M</kbd> <kbd>Tab</kbd></dt><dd data-i18n>Map, messages</dd></div>
-            <div><dt><kbd>Esc</kbd> <kbd>P</kbd></dt><dd data-i18n>Pause</dd></div>
+            <div><dt><kbd>Esc</kbd></dt><dd data-i18n>Pause</dd></div>
           </dl>
           <p class="hint key-only" data-i18n>In menus: arrow keys and Enter, Esc goes back. Change keys in the game's Options, Controls.</p>
         </div>
@@ -140,28 +131,25 @@
     <section class="panel" id="changes" aria-labelledby="changes-title">
       <h2 id="changes-title" data-i18n>Changes from the original</h2>
       <div class="prose">
-        <p data-i18n>The PC game's own code, recompiled to run in Chrome and Firefox with WebGPU graphics and Web Audio sound. It runs at up to 120 fps in widescreen at your screen's resolution, with the original look at its highest settings.</p>
-        <p data-i18n>Drive with friends in free roam and race them in Online mode on this server, with no account, and honk at them with eight horns. Play on a keyboard, an Xbox or PlayStation controller, a steering wheel or a phone's touch controls, with your saves in this browser or in the cloud.</p>
+        <p data-i18n>FlatOut 2 runs in its original 4:3 presentation. The game is a single-player experience here; online play and free roam with friends are not available.</p>
+        <p data-i18n>Play with a keyboard. Controller and steering-wheel support have not been tested. Game saves stay in this browser; cloud saves are not available.</p>
       </div>
     </section>
 
     <section class="panel" id="about" aria-labelledby="about-title">
       <h2 id="about-title" data-i18n>About this project</h2>
       <div class="prose">
-        <p data-i18n>My brother and I played this game together about 20 years ago. I tried porting it to the browser, and it worked surprisingly well, so I put it online for others to enjoy. It got a bit out of hand. It's great to see so many people playing it.</p>
-        <p data-i18n-html>If you enjoy the project and want to help with the costs of hosting and development, you can <a href="https://ko-fi.com/nfsu2xyz" target="_blank" rel="noopener noreferrer">buy me a coffee</a>. It comes with no perks, apart from a role on the Discord server.</p>
-        <p data-i18n-html>Rights holders can email <a href="mailto:legal@nfsu2.xyz">legal@nfsu2.xyz</a>. Support emails won't be answered: for help, ask on <a href="https://discord.gg/25zXmQ2Ua9" target="_blank" rel="noopener noreferrer">our Discord</a>.</p>
+        <p data-i18n>I first wanted to make a 1:1 web port and began by decompiling the original game. That attempt did not get very far, and I set it aside. Later, I discovered the nfsu2.xyz project and was inspired by how it was built to take a second run at bringing FlatOut 2 to the web.</p>
       </div>
       <h3 data-i18n>Credits</h3>
       <div class="prose">
-        <p data-i18n-html>The source code is on <a href="https://github.com/th0mk/nfsu2-web" target="_blank" rel="noopener noreferrer">GitHub</a>. This port is based on <a href="https://github.com/TalhaMudo/NFSU2Recomp" target="_blank" rel="noopener noreferrer">NFSU2Recomp</a> by Talha Müderrisoğlu, the original x86 → C static recompiler for NFSU2, which in turn follows the method of <a href="https://github.com/N64Recomp/N64Recomp" target="_blank" rel="noopener noreferrer">N64: Recompiled</a> and <a href="https://github.com/hedge-dev/XenonRecomp" target="_blank" rel="noopener noreferrer">XenonRecomp</a>.</p>
-        <p data-i18n-html>The language packs are built from KyoriAsh's <a href="https://nfsmods.xyz/mod/5749" target="_blank" rel="noopener noreferrer">Multi 13 languages mod</a> (with Lee-Ryo's Thai support), from TraduMix's and MixMods' Brazilian Portuguese translation (Fyro, Beater, Kerlyston F.; Junior_Djjr, SideWinder, Elyzandro), from PLProjekt's Polish translation (Daniel Graszka, MaDeR, Marcin Piech, Nati, Mateusz Wilkowski, alter) and from VileStuff's <a href="https://nfsmods.xyz/mod/5286" target="_blank" rel="noopener noreferrer">English Subtitles Fixed</a>. The texture pack is built from LunicAura106's <a href="https://nfsmods.xyz/mod/4319" target="_blank" rel="noopener noreferrer">Upscaled HUD</a>.</p>
+        <p data-i18n-html>Inspired by <a href="https://nfsu2.xyz" target="_blank" rel="noopener noreferrer">nfsu2.xyz</a>. <a href="https://github.com/th0mk/nfsu2-web" target="_blank" rel="noopener noreferrer">Source code</a>.</p>
       </div>
     </section>
   </div>
 
   <div class="content">
-    <section class="panel" id="saves" aria-labelledby="saves-title">
+    <section class="panel" id="saves" hidden aria-labelledby="saves-title">
       <div class="panel-head">
         <h2 id="saves-title" data-i18n>Saves</h2>
         <div class="row">
@@ -212,13 +200,13 @@
       <p class="msg warn" id="storage-note" hidden></p>
     </section>
 
-    <section class="panel" id="online" aria-labelledby="online-title">
+    <section class="panel" id="online" hidden aria-labelledby="online-title">
       <h2 id="online-title" data-i18n>Online</h2>
       <p class="hint" id="online-note" hidden></p>
       <div id="online-body"></div>
     </section>
 
-    <section class="panel" id="settings" aria-labelledby="settings-title">
+    <section class="panel" id="settings" hidden aria-labelledby="settings-title">
       <h2 id="settings-title" data-i18n>Settings</h2>
       <p class="hint" id="settings-note">Saved in this browser. Changes apply the next time you press Play.</p>
       <div id="settings-body"></div>
