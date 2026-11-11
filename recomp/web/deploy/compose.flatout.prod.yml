@@ -11,7 +11,8 @@
 name: flatout-prod
 services:
   server:
-    image: ${FLATOUT_IMAGE:?set FLATOUT_IMAGE in .env (ghcr.io/<owner>/<repo>-rs:sha-<commit>)}
+    image: '${FLATOUT_IMAGE:?FLATOUT_IMAGE must be set}'
+    pull_policy: always
     restart: unless-stopped
     network_mode: host
     command: ["--behind-proxy", "--spy-relay"]
