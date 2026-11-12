@@ -41,35 +41,43 @@
 <body data-phase="boot">
 
 <main class="app" id="app">
-  <header class="top">
-    <div class="top-row">
-      <h1>FlatOut 2 <span class="brand-mark">WEB PORT</span></h1>
-      <div class="top-end">
-        <p class="hint" data-i18n>Fan project. Not affiliated with or endorsed by Bugbear Entertainment.</p>
+  <div class="launcher">
+    <div class="hero-screen">
+      <div class="brand">
+        <h1>FLATOUT <span>2</span></h1>
+        <p class="brand-mark">WEB PORT</p>
+      </div>
+      <div class="launch-bottom">
+        <section class="launch-status" aria-label="Game status">
+          <div class="status-line"><p class="status" id="status" role="status">Loading</p></div>
+          <div class="bar" id="progress" role="progressbar" data-i18n-attr="aria-label" aria-label="Game loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar-fill" id="progress-fill"></div></div>
+          <p class="status-sub" id="status-sub">Loading the game.</p>
+          <div class="row">
+            <button type="button" class="btn" id="retry" hidden data-i18n>Retry</button>
+            <button type="button" class="btn" id="reload" hidden data-i18n>Reload</button>
+            <button type="button" class="text-btn" id="log-btn" hidden data-i18n>Download log</button>
+          </div>
+          <p class="msg" id="lastgame" hidden></p>
+          <p class="msg" id="report" hidden data-i18n-html>Help get it fixed: download the log and keep it with details of what you were doing when it happened.</p>
+          <p class="msg" id="newer" aria-live="polite" hidden></p>
+          <ul class="problems" id="problems" aria-live="polite"></ul>
+          <p class="msg warn" id="override" hidden></p>
+        </section>
+        <nav class="launch-menu" aria-label="Main menu">
+          <button type="button" class="menu-item primary" id="play" disabled data-i18n>Play</button>
+          <button type="button" class="menu-item" data-panel="controls" aria-haspopup="dialog" data-i18n>Controls</button>
+          <button type="button" class="menu-item" data-panel="game-data" aria-haspopup="dialog">Game data</button>
+          <button type="button" class="menu-item" data-panel="about" aria-haspopup="dialog" data-i18n>About</button>
+        </nav>
       </div>
     </div>
-    <div class="bar" id="progress" role="progressbar" data-i18n-attr="aria-label" aria-label="Game loading" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-      <div class="bar-fill" id="progress-fill"></div>
-    </div>
-  </header>
+  </div>
+  <footer class="app-footer">
+    <p>Unofficial fan-made browser port of FlatOut 2.</p>
+    <p>FlatOut 2 was created by Bugbear Entertainment. This project is not affiliated with or endorsed by Bugbear Entertainment.</p>
+  </footer>
 
-  <div class="side">
-    <section class="panel hero" data-i18n-attr="aria-label" aria-label="Play">
-      <p class="status" id="status" role="status">Loading</p>
-      <p class="status-sub" id="status-sub">Loading the game.</p>
-      <div class="row">
-        <button type="button" class="play" id="play" disabled data-i18n-html>Play <kbd class="key-only">Enter</kbd></button>
-        <button type="button" class="btn" id="retry" hidden data-i18n>Retry</button>
-        <button type="button" class="btn" id="reload" hidden data-i18n>Reload</button>
-        <button type="button" class="text-btn" id="log-btn" hidden data-i18n>Download log</button>
-      </div>
-      <p class="msg" id="lastgame" hidden></p>
-      <p class="msg" id="report" hidden data-i18n-html>Help get it fixed: download the log and keep it with details of what you were doing when it happened.</p>
-      <p class="msg" id="newer" aria-live="polite" hidden></p>
-      <ul class="problems" id="problems" aria-live="polite"></ul>
-      <p class="msg warn" id="override" hidden></p>
-    </section>
-
+  <div class="side launcher-source">
     <section class="panel" id="controls" aria-labelledby="controls-title">
       <h2 id="controls-title" data-i18n>Controls</h2>
       <div id="keys">
@@ -131,7 +139,7 @@
     <section class="panel" id="changes" aria-labelledby="changes-title">
       <h2 id="changes-title" data-i18n>Changes from the original</h2>
       <div class="prose">
-        <p data-i18n>FlatOut 2 runs in its original 4:3 presentation. The game is a single-player experience here; online play and free roam with friends are not available.</p>
+        <p data-i18n>FlatOut 2 runs in its original 4:3 presentation. Online play uses the game's own OpenSpy servers: join an existing lobby or create one from inside the game.</p>
         <p data-i18n>Play with a keyboard. Controller and steering-wheel support have not been tested. Game saves stay in this browser; cloud saves are not available.</p>
       </div>
     </section>
@@ -143,7 +151,8 @@
       </div>
       <h3 data-i18n>Credits</h3>
       <div class="prose">
-        <p data-i18n-html>Inspired by the creator of <a href="https://nfsu2.xyz" target="_blank" rel="noopener noreferrer">nfsu2.xyz</a>. <a href="https://github.com/MetaMmodern/fo2web" target="_blank" rel="noopener noreferrer">Source code</a>.</p>
+        <p data-i18n-html>Inspired by the creator of <a href="https://nfsu2.xyz" target="_blank" rel="noopener noreferrer">nfsu2.xyz</a>.</p>
+        <p><a href="https://github.com/MetaMmodern/fo2web" target="_blank" rel="noopener noreferrer">Source code</a></p>
       </div>
     </section>
   </div>
@@ -237,6 +246,20 @@
     </section>
   </div>
 </main>
+
+<dialog class="dlg launch-dialog" id="dialog-controls" aria-labelledby="dialog-controls-title">
+  <form method="dialog" class="dlg-head"><h2 id="dialog-controls-title" data-i18n>Controls</h2><button class="btn" value="close" data-i18n>Close</button></form>
+  <div data-dialog-content="controls"></div>
+</dialog>
+<dialog class="dlg launch-dialog" id="dialog-game-data" aria-labelledby="dialog-game-data-title">
+  <form method="dialog" class="dlg-head"><h2 id="dialog-game-data-title">Game data</h2><button class="btn" value="close" data-i18n>Close</button></form>
+  <div data-dialog-content="game-data"></div>
+</dialog>
+<dialog class="dlg launch-dialog" id="dialog-about" aria-labelledby="dialog-about-title">
+  <form method="dialog" class="dlg-head"><h2 id="dialog-about-title" data-i18n>About</h2><button class="btn" value="close" data-i18n>Close</button></form>
+  <div data-dialog-content="about"></div>
+  <div class="runtime-notes" id="about-runtime-notes"></div>
+</dialog>
 
 <div class="stage" id="stage" hidden>
   <button type="button" class="stage-menu" id="stage-menu" tabindex="-1" data-i18n-attr="aria-label" aria-label="Menu" data-nfsu2-ui hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg></button>
