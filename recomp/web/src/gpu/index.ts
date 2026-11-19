@@ -252,13 +252,15 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   let imgRect: { x: number; y: number; w: number; h: number } | null = null;
   // quick chat's places of the frame being drawn (onMarks): id, x, y, scale each, the same words as two views
   const markF = new Float32Array(4 * P.MARKS_MAX), markI = new Uint32Array(markF.buffer);
-  let inFlight = 0, alive = true, pumping = false;
+  let inFlight = 0, alive = true, pumping = false, captureDraining = false;
+  let captureRelease: (() => void) | null = null;
   let frames = 0, encMsTotal = 0, encMsLast = 0, drawsLast = 0, passesLast = 0, directFrames = 0;
   // the benchmark window (Renderer.window): per-frame samples, bounded
   const WIN_MAX = 1 << 17;
   let winEnc: number[] = [], winGpu: number[] = [], winDraws = 0, winPasses = 0, winCalls = { ...enc.calls };
   let done: number[] = [];
   const localInspector: LocalGpuInspector | undefined = window.webgpuInspector;
+  // Deferred Inspector readback freezes this frame and maps one staging buffer at a time.
   let captureNext: { resolve: () => void; reject: (reason: unknown) => void } | null = null;
   const captureGpuFrame = (): Promise<void> => new Promise((resolve, reject) => {
     if (captureNext) { reject(new Error('A GPU frame capture is already queued')); return; }
@@ -325,7 +327,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     if (failRun === LOST_AFTER) lost(`device gone: ${LOST_AFTER} times in a row the WebGPU calls failed`);
   };
   const pump = () => {
-    if (!alive || pumping) return;
+    if (!alive || pumping || captureDraining) return;
     pumping = true;
     try {
       for (;;) {
@@ -339,9 +341,17 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
         const limit = r && !e ? U[cw + C.frame + (r - 1) * (P.FRAME_BYTES >> 2) + F.rqEnd] : head;
         try { enc.drain(limit); } catch (x) { failed('resource upload', x); break; }
         waiting(!!r && !e && inFlight >= maxInFlight);
-        if (!r || e || inFlight >= maxInFlight) break;
+        if (!r || e || inFlight >= maxInFlight || captureDraining) break;
         if (Atomics.compareExchange(I, cw + C.state, s, s | (r << 2)) !== s) continue;
         try { encodeAndSubmit(r - 1); failRun = 0; } catch (x) { failed('encode', x); }
+        // Do not even drain the following frame's uploads: deferred capture reads the just
+        // submitted frame's mutable pool and render targets until it has copied them all.
+        // Keep the handoff claimed too, so the guest cannot rotate back to and overwrite
+        // this record buffer while JavaScript serializes its CPU provenance.
+        if (captureDraining) {
+          captureRelease = () => { Atomics.store(i32(), cw + C.state, 0); Atomics.notify(i32(), cw + C.state); };
+          break;
+        }
         Atomics.store(I, cw + C.state, 0); Atomics.notify(I, cw + C.state);
       }
     } finally { pumping = false; }
@@ -422,7 +432,13 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     captureNext = null;
     let capturing = false;
     if (capture && localInspector) {
-      try { localInspector.beginFrameCapture({ maxBufferSize: 128 * 1024 * 1024 }); capturing = true; }
+      try {
+        localInspector.beginFrameCapture({
+          deferredPayloadReadback: true,
+        });
+        capturing = true;
+        log('[gpu-inspector] capturing one frozen frame; payloads will read back sequentially');
+      }
       catch (e) { capture.reject(e); log(`[gpu-inspector] capture could not start: ${e}`); }
     }
     try {
@@ -486,10 +502,32 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
       capturing = false;
       try {
         localInspector.endFrameCapture();
-        void localInspector.saveCaptureData(`fo2-frame-${Date.now()}.wgpuc`).then(() => {
+        captureDraining = true;
+        void localInspector.drainCapturePayloads().then(async () => {
+          const stream = await localInspector.saveCaptureData(undefined, { download: false });
+          const commands = (stream.metadata.commands ?? []) as { method?: string; args?: unknown[]; index?: number }[];
+          const byMarker = new Map<string, number>();
+          for (let q = 0; q < commands.length; q++) {
+            const c = commands[q];
+            if (c.method !== 'pushDebugGroup' || typeof c.args?.[0] !== 'string' || !c.args[0].startsWith('fo2:d3d:')) continue;
+            for (let k = q + 1; k < commands.length; k++) if (commands[k].method === 'draw' || commands[k].method === 'drawIndexed') {
+              byMarker.set(c.args[0], commands[k].index ?? k); break;
+            }
+          }
+          for (const d of st.d3dDraws) d.webgpuCommandIndex = byMarker.get(String(d.correlationMarker)) ?? -1;
+          stream.metadata.d3dDraws = st.d3dDraws;
+          const url = URL.createObjectURL(localInspector.captureStreamToBlob(stream));
+          const a = document.createElement('a');
+          a.href = url; a.download = `fo2-frame-${Date.now()}.wgpuc`; document.body.append(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+        }).then(() => {
           log('[gpu-inspector] saved one frame to Downloads');
           capture.resolve();
-        }, e => { log(`[gpu-inspector] save failed: ${e}`); capture.reject(e); });
+        }, e => { log(`[gpu-inspector] save failed: ${e}`); capture.reject(e); }).finally(() => {
+          captureRelease?.(); captureRelease = null;
+          captureDraining = false;
+          pump();
+        });
       } catch (e) { log(`[gpu-inspector] capture failed: ${e}`); capture.reject(e); }
     }
     enc.afterSubmit();

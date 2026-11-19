@@ -1,9 +1,15 @@
 /** Optional, same-origin WebGPU Inspector instrumentation for local frame captures. */
 export interface LocalGpuInspector {
   initialize(): void;
-  beginFrameCapture(options?: { maxBufferSize?: number }): void;
+  beginFrameCapture(options?: {
+    maxBufferSize?: number; maxTextureSize?: number; maxCaptureBytes?: number; deferredPayloadReadback?: boolean;
+  }): void;
   endFrameCapture(): void;
-  saveCaptureData(filename?: string): Promise<unknown>;
+  drainCapturePayloads(): Promise<void>;
+  saveCaptureData(filename?: string, options?: { download?: boolean }): Promise<{
+    metadata: Record<string, unknown>; payloads: unknown[];
+  }>;
+  captureStreamToBlob(stream: { metadata: Record<string, unknown>; payloads: unknown[] }): Blob;
 }
 
 declare global {

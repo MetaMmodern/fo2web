@@ -43,6 +43,7 @@ try {
   const objects = data.objects ?? {};
   const commands = data.commands ?? [];
   const payloads = data.payloadTable ?? [];
+  const d3dDraws = data.d3dDraws ?? [];
   const label = (id, cls) => {
     const obj = objects[String(id)];
     if (!obj) return `${cls ?? 'object'}#${id}`;
@@ -73,6 +74,23 @@ try {
   console.log(`Capture: ${file}`);
   console.log(`Format ${header[1]}, tool ${data.tool ?? '?'} ${data.toolVersion ?? ''}, frame ${data.frame ?? '?'}`);
   console.log(`${(fileSize / 1048576).toFixed(1)} MiB; ${Object.keys(objects).length} objects; ${commands.length} commands; ${payloads.length} payloads`);
+  console.log(`CPU D3D provenance: ${d3dDraws.length} draw(s)`);
+  if (d3dDraws.length) {
+    const correlated = d3dDraws.filter(d => Number.isInteger(d.cpuDrawSeq) && Number.isInteger(d.gwDrawIndex) &&
+      Number.isInteger(d.webgpuCommandIndex) && d.webgpuCommandIndex >= 0).length;
+    const ps14 = d3dDraws.filter(d => d.ps === 14);
+    const ps2829 = d3dDraws.filter(d => d.ps === 28 || d.ps === 29);
+    const tex14 = ps14.filter(d => d.textures?.[0] === 14);
+    const tex82 = ps2829.filter(d => d.textures?.[0] === 82);
+    const tex83 = ps2829.filter(d => d.textures?.[0] === 83);
+    console.log(`  correlated CPU -> GwDraw -> WebGPU: ${correlated}/${d3dDraws.length}`);
+    console.log(`  targets: PS14=${ps14.length} (texture 14=${tex14.length}); PS28/29=${ps2829.length} (texture 82=${tex82.length}, 83=${tex83.length})`);
+  }
+  if (!summaryOnly) for (const d of d3dDraws) {
+      console.log(`  cpu=${d.cpuDrawSeq} gw=${d.gwDrawIndex} webgpu=${d.webgpuCommandIndex} ${d.callType} ` +
+        `fvf=0x${Number(d.fvf).toString(16)} stride=${d.vertexStride} prim=${d.primitiveType} vertices=${d.vertexCount} ` +
+        `vs=${d.vs} ps=${d.ps} tex=${(d.textures ?? []).join(',')} source=${Math.floor((d.vertexBytes?.length ?? 0) * 3 / 4)}B`);
+  }
   if (Object.keys(stats).length) console.log(`Statistics: ${JSON.stringify(stats)}`);
   if (vertexPayload && vertices) {
     const groupId = vertexPayload.command.args?.[1]?.__id;

@@ -4,7 +4,7 @@
 // the renderer refuses a control block whose layout word differs.
 
 export const GW_MAGIC = 0x55504757;
-export const GW_VERSION = 5;
+export const GW_VERSION = 6;
 export const GW_NBUF = 2;
 // GwHL: the other cars' headlights at this byte offset of every frame's VS constant arena (group 0 binding 3)
 export const K_HL = 256, HL_BYTES = 656, HL_MAX = 8;
@@ -16,22 +16,23 @@ export const KWIN_ROWS = 4096;
 
 // GwDraw: 156 bytes, all 32-bit fields (word index = byte offset / 4).  A blit's first and count: its source
 // rectangle, left | top << 16 and right | bottom << 16 (count 0 = the whole source)
-export const DRAW_BYTES = 156, DRAW_WORDS = 39;
+export const DRAW_BYTES = 160, DRAW_WORDS = 40;
 export const enum D {
   first = 0, count = 1, tex = 2, target = 3, kind = 4, blend = 5, aref = 6, depth = 7,
   tex1 = 8, tex2 = 9, tex3 = 10, ps = 11, psci = 12, vsid = 13, rawoff = 14, koff = 15,
   proj = 16, smp = 20, blitSrc = 24, bcol = 25, cull = 26, fogv = 27, clrArgb = 31, clrFlags = 32,
-  clrZ = 33, ksz = 34, ixIsz = 35, ixIb = 36, ixBase = 37, clip = 38,
+  clrZ = 33, ksz = 34, ixIsz = 35, ixIb = 36, ixBase = 37, clip = 38, prov = 39,
 }
 export const enum Kind { Draw = 0, Clear = 1, Blit = 2 }
 
 // GwFrame: 156 bytes.  rbId nonzero: after the frame, texture rbTex's level 0 goes to the game, rbRows rows of
 // rbPitch bytes at wasm address rbDst (see C.rbWant)
-export const FRAME_BYTES = 156;
+export const FRAME_BYTES = 172;
 export const enum F {
   seq = 0, dn = 1, vn = 2, rvn = 3, kn = 4, pscn = 5, draws = 6, tv = 7, raw = 8, k = 9, psc = 10,
   rqEnd = 11, bbW = 12, bbH = 13, clearArgb = 14, poolSize = 15, dump = 16, dumpFrame = 17, dumpLabel = 18, // byte 72, 64 chars
   rbId = 34, rbTex = 35, rbDst = 36, rbPitch = 37, rbRows = 38,
+  provN = 39, prov = 40, provBytesN = 41, provBytes = 42,
 }
 
 // GwCtl (word indices)

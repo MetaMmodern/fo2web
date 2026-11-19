@@ -63,6 +63,8 @@ static int      g_detached;      /* the page never attached: dropped back to nul
 #define MAXD   (16u * 1024u)                /* records per buffer */
 #define MAXRV  (16u * 1024u * 1024u)        /* raw vertex arena (bytes) */
 #define MAXKB  ( 4u * 1024u * 1024u)        /* VS constant arena (bytes) */
+#define MAXPROV MAXD
+#define MAXPROVB (32u * 1024u * 1024u)
 #define RQ_CAP (64u * 1024u * 1024u)        /* resource queue ring (bytes, power of two) */
 #define KZERO  256u                         /* K arena bytes [0, 256): an all-zero block for TVert draws (base 0) */
 #define KFIRST 2048u                        /* [GW_K_HL, + GW_HL_BYTES): the frame's headlights; [GW_K_MARKS, + GW_MARKS_BYTES):
@@ -75,6 +77,8 @@ typedef struct {
     uint8_t *rv; unsigned rvn;
     uint8_t *kb; unsigned kn;
     float  (*psc)[PSC_N][4]; unsigned pscn, psc_last, psc_lastver;
+    GwD3DDraw *prov; unsigned provn;
+    uint8_t *provb; unsigned provbn;
     unsigned last_koff, last_ksz; int last_vs;
 } Buf;
 static Buf g_b[GW_NBUF];
@@ -124,7 +128,8 @@ static void gw_init(void){
             Buf *B = &g_b[b];
             B->d = zalloc(sizeof(GwDraw) * MAXD); B->v = zalloc(sizeof(TVert) * MAXV);
             B->rv = zalloc(MAXRV); B->kb = zalloc(MAXKB + 4096); B->psc = zalloc(sizeof *B->psc * MAXD);
-            if (!B->d || !B->v || !B->rv || !B->kb || !B->psc) ok = 0;
+            B->prov = zalloc(sizeof *B->prov * MAXPROV); B->provb = zalloc(MAXPROVB);
+            if (!B->d || !B->v || !B->rv || !B->kb || !B->psc || !B->prov || !B->provb) ok = 0;
         }
         for (int b = 0; b < GW_NBUF; b++){
             g_b[b].kn = KFIRST;
@@ -649,7 +654,22 @@ static GwDraw *rec_draw(Buf *B, unsigned tex){
     D->clip = g_cur_clip;
     return D;
 }
+static uint32_t g_pending_prov;
+void metal_set_draw_provenance(const GwD3DDraw *p, const void *source){
+    g_pending_prov = 0;
+    if (!g_on || !p || !source || !p->source_bytes) return;
+    Buf *B = &g_b[g_cur];
+    if (B->provn >= MAXPROV || p->source_bytes > MAXPROVB - B->provbn) return;
+    GwD3DDraw *q = &B->prov[B->provn];
+    *q = *p;
+    q->source_off = B->provbn;
+    memcpy(B->provb + B->provbn, source, p->source_bytes);
+    B->provbn += p->source_bytes;
+    g_pending_prov = ++B->provn;
+}
 void metal_draw_tv(const TVert *src, unsigned nverts, unsigned prim, unsigned tex){
+    uint32_t prov = g_pending_prov;
+    g_pending_prov = 0;
     if (nverts < 3) return;
     unsigned tris = (prim == 4) ? nverts / 3 : nverts - 2;
     if (!tris) return;
@@ -671,6 +691,8 @@ void metal_draw_tv(const TVert *src, unsigned nverts, unsigned prim, unsigned te
     }
     GwDraw *D = rec_draw(B, tex);
     D->first = B->vn; D->count = tris * 3;
+    D->prov = prov;
+    if (D->prov) B->prov[D->prov - 1].gw_draw_index = B->dn;
     B->dn++; B->vn += tris * 3;
 }
 /* the VS constant block {u32 stride, tsel, base, 0; vec4 c[nk]}, deduplicated
@@ -900,6 +922,8 @@ static void handoff(uint32_t rb_id, uint32_t rb_tex, uint32_t rb_dst, uint32_t r
     F->seq = g_gframe; F->dn = B->dn; F->vn = B->vn; F->rvn = B->rvn; F->kn = B->kn; F->pscn = B->pscn;
     F->draws = (uint32_t)(uintptr_t)B->d; F->tv = (uint32_t)(uintptr_t)B->v; F->raw = (uint32_t)(uintptr_t)B->rv;
     F->k = (uint32_t)(uintptr_t)B->kb; F->psc = (uint32_t)(uintptr_t)B->psc;
+    F->prov_n = B->provn; F->prov = (uint32_t)(uintptr_t)B->prov;
+    F->prov_bytes_n = B->provbn; F->prov_bytes = (uint32_t)(uintptr_t)B->provb;
     F->rq_end = (uint32_t)g_ctl->rq_head;
     unsigned vw, vh; view_wh(&vw, &vh);
     F->bb_w = g_bb_w ? g_bb_w : vw; F->bb_h = g_bb_h ? g_bb_h : vh;
@@ -947,7 +971,7 @@ static void handoff(uint32_t rb_id, uint32_t rb_tex, uint32_t rb_dst, uint32_t r
     /* the other buffer is free now (the page released it before taking ours, or it was replaced) */
     g_cur ^= 1;
     Buf *N = &g_b[g_cur];
-    N->dn = N->vn = N->rvn = N->pscn = 0; N->kn = KFIRST; N->last_ksz = 0;
+    N->dn = N->vn = N->rvn = N->pscn = N->provn = N->provbn = 0; N->kn = KFIRST; N->last_ksz = 0;
     ((GwHL *)(N->kb + GW_K_HL))->n = 0;           /* no other cars' headlights until headlights.c sets them */
     ((GwMarks *)(N->kb + GW_K_MARKS))->n = 0;     /* nor quick chat's places until roam_game.c does */
     g_frame_clear = g_clear_argb;

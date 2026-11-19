@@ -9,6 +9,7 @@
 - Online car selection occasionally showed rapid jumps between rotation angles, but this has not been reproducible recently; monitor for recurrence.
 - Intro video frame-rate drops are no longer observed; monitor for recurrence.
 - GPU Inspector capture download is fixed, as far as currently known.
+- GPU capture must freeze one submitted frame, read its texture/buffer payloads in bounded sequential chunks, and include CPU D3D draw provenance correlated through `GwDraw` to WebGPU commands; Inspector's all-at-once readbacks lose the device, and a GPU-only trace is insufficient to diagnose stunt visual artifacts.
 - Widescreen support is postponed; the game intentionally uses its original 4:3 presentation for now. Previous experiments are recorded in `recomp/FLATOUT_WIDESCREEN.md`.
 - Online mode and replacing NFS branding/names and restyling the website UI are done.
 - The black square that intermittently appeared in the menu is no longer observed.

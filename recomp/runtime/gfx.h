@@ -16,4 +16,6 @@ typedef struct {
 } TVert;
 
 void metal_draw_tv(const TVert *tv, unsigned nverts, unsigned prim, unsigned tex);
+struct GwD3DDraw;
+void metal_set_draw_provenance(const struct GwD3DDraw *p, const void *source);
 #endif

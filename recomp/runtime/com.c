@@ -56,6 +56,7 @@ void metal_begin_frame(void);
 #ifdef __wasm__
 /* The browser renderer takes WGSL instead of MSL (docs/web/gpu-abi.md). */
 #include "web/wgsl.h"
+#include "web/gpu_proto.h"
 #define SHADER_TEXT_CAP (256*1024)
 #else
 #define SHADER_TEXT_CAP (16384)
@@ -259,6 +260,9 @@ static uint64_t g_fo2_pass_draw_mark=0;
 /* UV count while a parsed null-VS PosprojTex1/PosprojTex4 pass is active. */
 static uint32_t g_posproj_pass_uvs=0;
 static uint32_t g_d3d9=0, g_dev=0, g_cur_decl=0, g_cur_fvf=0, g_cur_tex=0;
+static uint32_t g_prov_call_type;
+static float g_d3d_xform[3][16];
+static uint32_t g_d3d_xform_mask;
 
 /* ---------------- vertex shader (interpreted on the CPU) ----------------
  * NFSU2 does all its drawing with DrawPrimitiveUP and the positions are RAW
@@ -1962,6 +1966,49 @@ static void draw_posproj(uint32_t vp, uint32_t nv, uint32_t pt, uint32_t stride,
     metal_set_stage_tex(g_tex_stage[1],g_tex_stage[2],g_tex_stage[3]);
     metal_set_ps(g_cur_ps_id,&g_psc[0][0]);
     texproj_push(); smp_push();
+#ifdef __wasm__
+    if (vp && stride && nv <= UINT32_MAX / stride){
+        int suspect = (g_cur_tex == 14u && g_cur_ps_id == 14) ||
+                      ((g_cur_tex == 82u || g_cur_tex == 83u) &&
+                       (g_cur_ps_id == 28 || g_cur_ps_id == 29));
+        uint32_t captured_nv = suspect || nv < 6u ? nv : 6u;
+        GwD3DDraw p; memset(&p, 0, sizeof p);
+        p.cpu_draw_seq = (uint32_t)g_draw; p.call_type = g_prov_call_type;
+        p.fvf = g_cur_fvf; p.vertex_decl = g_cur_decl;
+        p.source_ptr = vp; p.source_bytes = captured_nv * stride;
+        p.vertex_stride = stride; p.primitive_type = pt; p.vertex_count = nv;
+        p.vs = (int32_t)g_cur_vs; p.ps = g_cur_ps_id;
+        for (int q = 0; q < 4; q++) p.textures[q] = g_tex_stage[q];
+        p.render_target = g_cur_rt;
+        static const uint8_t rsi[16] = {7,14,15,19,20,23,24,25,27,168,171,22,193,28,34,0};
+        for (int q = 0; q < 16; q++) p.rs[q] = g_rs[rsi[q]];
+        for (int q = 0; q < 4; q++){ p.tss[q][0] = g_tss_raw[q][11]; p.tss[q][1] = g_tss_raw[q][24]; }
+        p.transform_mask = g_d3d_xform_mask;
+        memcpy(p.transforms, g_d3d_xform, sizeof p.transforms);
+        uint32_t ep = (g_cur_decl && mem_is_committed(g_cur_decl + 8u)) ? MR32(g_cur_decl + 4u) : 0;
+        if (ep){
+            for (unsigned q = 0; q < GW_PROV_ELEMS; q++){
+                uint32_t a = ep + q * 8u;
+                if (!mem_is_committed(a + 7u)) break;
+                GwProvElem *pe = &p.elements[p.element_count];
+                pe->stream = MR16(a); pe->offset = MR16(a + 2u);
+                pe->type = MR8(a + 4u); pe->method = MR8(a + 5u);
+                pe->usage = MR8(a + 6u); pe->usage_index = MR8(a + 7u); pe->reg = -1;
+                if (pe->stream == 0xFFu && pe->type == 17u) break;
+                p.element_count++;
+            }
+        } else {
+            p.element_count = 1u + (uvs > 4u ? 4u : uvs);
+            p.elements[0].type = 3u; p.elements[0].usage = 9u; p.elements[0].reg = -1; /* FLOAT4 POSITIONT */
+            for (unsigned q = 1; q < p.element_count; q++){
+                p.elements[q].offset = (uint16_t)(8u + q * 8u);
+                p.elements[q].type = 1u; p.elements[q].usage = 5u;
+                p.elements[q].usage_index = (uint8_t)(q - 1u); p.elements[q].reg = -1; /* FLOAT2 TEXCOORD */
+            }
+        }
+        metal_set_draw_provenance(&p, g_mem + vp);
+    }
+#endif
     metal_draw_tv(tv,nv,pt,g_cur_tex);
 }
 
@@ -2539,7 +2586,52 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
         }
     }
     if (lines) draw_lines(tv, nv, pt);
-    else metal_draw_tv(tv, nv, pt, g_cur_tex);
+    else {
+#ifdef __wasm__
+        int suspect = (g_cur_tex == 14u && g_cur_ps_id == 14) ||
+                      ((g_cur_tex == 82u || g_cur_tex == 83u) &&
+                       (g_cur_ps_id == 28 || g_cur_ps_id == 29));
+        if (vp && stride && nv <= UINT32_MAX / stride){
+            GwD3DDraw p; memset(&p, 0, sizeof p);
+            uint32_t captured_nv = suspect || nv < 6u ? nv : 6u;
+            p.cpu_draw_seq = (uint32_t)g_draw;
+            p.call_type = g_prov_call_type;
+            p.fvf = g_cur_fvf; p.vertex_decl = g_cur_decl;
+            p.source_ptr = vp; p.source_bytes = captured_nv * stride;
+            p.vertex_stride = stride; p.primitive_type = pt; p.vertex_count = nv;
+            p.vs = (int32_t)g_cur_vs; p.ps = g_cur_ps_id;
+            for (int q = 0; q < 4; q++) p.textures[q] = g_tex_stage[q];
+            p.render_target = g_cur_rt;
+            static const uint8_t rsi[16] = {7,14,15,19,20,23,24,25,27,168,171,22,193,28,34,0};
+            for (int q = 0; q < 16; q++) p.rs[q] = g_rs[rsi[q]];
+            for (int q = 0; q < 4; q++){ p.tss[q][0] = g_tss_raw[q][11]; p.tss[q][1] = g_tss_raw[q][24]; }
+            p.transform_mask = g_d3d_xform_mask;
+            memcpy(p.transforms, g_d3d_xform, sizeof p.transforms);
+            uint32_t ep = (g_cur_decl && mem_is_committed(g_cur_decl + 8u)) ? MR32(g_cur_decl + 4u) : 0;
+            if (ep){
+                for (unsigned q = 0; q < GW_PROV_ELEMS; q++){
+                    uint32_t a = ep + q * 8u;
+                    if (!mem_is_committed(a + 7u)) break;
+                    GwProvElem *pe = &p.elements[p.element_count];
+                    pe->stream = MR16(a); pe->offset = MR16(a + 2u);
+                    pe->type = MR8(a + 4u); pe->method = MR8(a + 5u);
+                    pe->usage = MR8(a + 6u); pe->usage_index = MR8(a + 7u);
+                    if (pe->stream == 0xFFu && pe->type == 17u) break;
+                    pe->reg = prog ? (int8_t)vs_input_reg(prog, pe->usage, pe->usage_index) : -1;
+                    p.element_count++;
+                }
+            } else {
+                p.element_count = nel > GW_PROV_ELEMS ? GW_PROV_ELEMS : (uint32_t)nel;
+                for (uint32_t q = 0; q < p.element_count; q++){
+                    p.elements[q].offset = el[q].off; p.elements[q].type = el[q].type;
+                    p.elements[q].usage = 0xFFu; p.elements[q].usage_index = 0xFFu; p.elements[q].reg = el[q].reg;
+                }
+            }
+            metal_set_draw_provenance(&p, g_mem + vp);
+        }
+#endif
+        metal_draw_tv(tv, nv, pt, g_cur_tex);
+    }
     return 1;
 }
 
@@ -3313,6 +3405,10 @@ int com_call(CPU *c, uint32_t magic){
             r=0; }
         else if (!strncmp(nm,"Draw",4)){
             g_draw++;
+            g_prov_call_type = MID(DrawPrimitiveUP) ? 3u :
+                               NMEQ(nm,"DrawPrimitive") ? 1u :
+                               MID(DrawIndexedPrimitive) ? 2u :
+                               NMEQ(nm,"DrawIndexedPrimitiveUP") ? 4u : 0u;
             { static const char *seen[8]; static int ns=0;
               int f=0; for(int q=0;q<ns;q++) if(seen[q]==nm) f=1;   /* names come from the g_if table: the pointer suffices */
               if(!f && ns<8){ seen[ns++]=nm;
@@ -4481,6 +4577,10 @@ int com_call(CPU *c, uint32_t magic){
                     fprintf(stderr,"      %10.4f %10.4f %10.4f %10.4f\n",
                             MRF32(mp+rw*16), MRF32(mp+rw*16+4),
                             MRF32(mp+rw*16+8), MRF32(mp+rw*16+12)); } }
+            if (mp && mem_is_committed(mp+63)){
+                int xi = ty == 256u ? 0 : ty == 2u ? 1 : ty == 3u ? 2 : -1;
+                if (xi >= 0){ memcpy(g_d3d_xform[xi], g_mem + mp, 64); g_d3d_xform_mask |= 1u << xi; }
+            }
             if (ENVC("XFORM") && nt<9 && mp && mem_is_committed(mp+63)){ nt++;
                 const char *tn = ty==2?"VIEW":(ty==3?"PROJECTION":(ty==256?"WORLD":"?"));
                 fprintf(stderr,"  [SetTransform] type=%u(%s)\n", ty, tn);

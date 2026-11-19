@@ -29,9 +29,16 @@ import { dxt1HasPunch, dxt1ToAstc } from './astc';
 
 export interface EncodeStats {
   draws: number; passes: number; skipped: number; encodeMs: number;
+  d3dDraws: Record<string, unknown>[];
   /** the frame was drawn straight into the texture given to encodeFrame (no back buffer, no composite) */
   direct: boolean;
 }
+
+const bytesBase64 = (b: Uint8Array): string => {
+  let s = '';
+  for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode(...b.subarray(i, i + 32768));
+  return btoa(s);
+};
 
 interface Tex {
   serial: number; tex: GPUTexture; fmt: number; w: number; h: number; levels: number; cube: boolean; rt: boolean;
@@ -617,6 +624,7 @@ export class Encoder {
     const b1 = this.b1, dyn = this.dyn;
     b1[0] = -1;
     let draws = 0, passes = 0, skipped = 0;
+    const d3dDraws: Record<string, unknown>[] = [];
     const endPass = () => { if (pass) { pass.end(); pass = null; } };
 
     const openPass = (target: number, zid: number): GPURenderPassEncoder | null => {
@@ -784,12 +792,59 @@ export class Encoder {
       const bcol = u32[w + D.bcol];
       if (bcol !== cBcol) { p.setBlendConstant({ r: ((bcol >>> 16) & 255) / 255, g: ((bcol >>> 8) & 255) / 255, b: (bcol & 255) / 255, a: (bcol >>> 24) / 255 }); cBcol = bcol; this.calls.blend++; }
 
+      const provIx = u32[w + D.prov];
+      const marker = provIx ? `fo2:d3d:${u32[(u32[fw + F.prov] >> 2) + (provIx - 1) * 133]}:gw:${i}` : '';
+      if (marker) p.pushDebugGroup(marker);
       if (isz) {
         const fmt: GPUIndexFormat = isz === 4 ? 'uint32' : 'uint16';
         if (fmt !== cIx) { p.setIndexBuffer(this.pool!, fmt); cIx = fmt; this.calls.ix++; }
         p.drawIndexed(count, 1, u32[w + D.ixIb] / isz, i32[w + D.ixBase], kb);
       } else if (vsid > 0) p.draw(count, 1, 0, kb);
       else p.draw(count, 1, u32[w + D.first], 0);
+      if (marker) p.popDebugGroup();
+      if (provIx) {
+        const provPtr = u32[fw + F.prov] + (provIx - 1) * 532;
+        const blobPtr = u32[fw + F.provBytes];
+        const dv = new DataView(this.memory.buffer);
+        const U = (o: number) => dv.getUint32(provPtr + o, true);
+        const I = (o: number) => dv.getInt32(provPtr + o, true);
+        const sourceBytes = U(24), sourceOff = U(28), elemN = Math.min(U(44), 16);
+        const capturedVertices = U(32) ? Math.floor(sourceBytes / U(32)) : 0;
+        const fullVertexCapture = (U(56) === 14 && I(52) === 14) ||
+          ((U(56) === 82 || U(56) === 83) && (I(52) === 28 || I(52) === 29));
+        const elements = [];
+        for (let q = 0; q < elemN; q++) {
+          const o = provPtr + 372 + q * 10;
+          elements.push({ stream: dv.getUint16(o, true), offset: dv.getUint16(o + 2, true),
+            type: dv.getUint8(o + 4), method: dv.getUint8(o + 5), usage: dv.getUint8(o + 6),
+            usageIndex: dv.getUint8(o + 7), register: dv.getInt8(o + 8) });
+        }
+        const transforms: number[][] = [];
+        for (let m = 0; m < 3; m++) transforms.push(Array.from({ length: 16 }, (_, q) => dv.getFloat32(provPtr + 180 + (m * 16 + q) * 4, true)));
+        const rsNames = ['zEnable', 'zWriteEnable', 'alphaTestEnable', 'srcBlend', 'dstBlend', 'zFunc', 'alphaRef',
+          'alphaFunc', 'alphaBlendEnable', 'colorWriteEnable', 'blendOp', 'cullMode', 'blendFactor', 'fogEnable', 'fogColor', 'reserved'];
+        const renderState = Object.fromEntries(rsNames.map((name, q) => [name, U(80 + q * 4)]));
+        const first = u32[w + D.first];
+        const tvPtr = u32[fw + F.tv] + first * P.TVERT_BYTES;
+        d3dDraws.push({
+          cpuDrawSeq: U(0), gwDrawIndex: U(4), webgpuCommandIndex: -1, correlationMarker: marker,
+          callType: ['Unknown', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP', 'DrawIndexedPrimitiveUP'][U(8)] ?? `Call${U(8)}`,
+          fvf: U(12), vertexDeclarationId: U(16), vertexDeclaration: elements,
+          sourceVertexPointer: U(20), sourceByteRange: [U(20), U(20) + sourceBytes],
+          vertexStride: U(32), primitiveType: U(36), vertexCount: U(40), capturedVertexCount: capturedVertices,
+          vertexBytes: bytesBase64(new Uint8Array(this.memory.buffer, blobPtr + sourceOff, sourceBytes)),
+          vs: I(48), ps: I(52), textures: [U(56), U(60), U(64), U(68)],
+          renderTarget: U(72), depthSurface: depth >>> 8,
+          transformsSet: U(176), worldTransform: transforms[0], viewTransform: transforms[1], projectionTransform: transforms[2],
+          renderState,
+          textureStageState: Array.from({ length: 4 }, (_, q) => ({
+            textureCoordinateIndex: U(144 + q * 8), textureTransformFlags: U(148 + q * 8),
+          })),
+          generatedTVertFirst: first, generatedTVertCount: count,
+          generatedTVertBytes: bytesBase64(new Uint8Array(this.memory.buffer, tvPtr,
+            (fullVertexCapture ? count : Math.min(count, 6)) * P.TVERT_BYTES)),
+        });
+      }
       if (vsid > 0) { this.gpuVsDraws++; this.gpuVsVerts += count; }
       draws++; this.calls.draw++;
       if (tr) tr.push(`  #${i} ${isz ? `ix${isz * 8} ib ${u32[w + D.ixIb]} base ${i32[w + D.ixBase]}` : vsid > 0 ? 'raw' : `tvert ${u32[w + D.first]}`} n ${count} vs ${vsid} ps ${psid}${psEff !== psid ? `->${psEff}` : ''} blend ${blend.toString(16)} depth ${(depth & 63).toString(16)}${realZ ? '' : '(off)'} cull ${cull} aref ${aref.toFixed(3)} bcol ${bcol.toString(16)} tex ${t0}${v0.serial === 0 && t0 ? '(white)' : ''},${t1},${t2},${t3} smp ${s0.toString(16)} koff ${koff} kb ${kb} poff ${poff}`);
@@ -846,7 +901,7 @@ export class Encoder {
     }
     if (pslots) this.queue.writeBuffer(this.pBuf, 0, ps, 0, pslots * (PSLOT / 4));
     this.totalDraws += draws; this.totalPasses += passes;
-    return { draws, passes, skipped, encodeMs: performance.now() - t0, direct: isDirect };
+    return { draws, passes, skipped, encodeMs: performance.now() - t0, direct: isDirect, d3dDraws };
   }
 
   /** StretchRect from a rectangle of `src` (r0 left | top << 16, r1 right | bottom << 16): the rectangle copied into

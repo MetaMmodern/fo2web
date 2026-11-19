@@ -20,12 +20,34 @@
 #include <stddef.h>
 
 #define GW_MAGIC   0x55504757u          /* "WGPU" */
-#define GW_VERSION 5u                   /* 2: the headlights block in the K arena (GwHL); 3: K blocks 16-byte aligned, bound in windows;
-                                           4: GwDraw.clip; 5: GW_BLIT's source rectangle, a texture read back (GwFrame.rb_*) */
+#define GW_VERSION 6u                   /* 6: scoped CPU D3D draw provenance */
 #define GW_NBUF    2                    /* record buffers: one being written, one handed off */
 
 /* GwDraw.kind */
 enum { GW_DRAW = 0, GW_CLEAR = 1, GW_BLIT = 2 };
+
+#define GW_PROV_ELEMS 16
+typedef struct {
+    uint16_t stream, offset;
+    uint8_t type, method, usage, usage_index;
+    int8_t reg;
+    uint8_t pad;
+} GwProvElem;
+/* CPU-side state before draw_up converts source vertices to TVert.  Source
+ * bytes live in GwFrame.prov_bytes at source_off.  The generated TVerts are
+ * addressed by the correlated GwDraw.first/count. */
+typedef struct GwD3DDraw {
+    uint32_t cpu_draw_seq, gw_draw_index, call_type, fvf;
+    uint32_t vertex_decl, source_ptr, source_bytes, source_off;
+    uint32_t vertex_stride, primitive_type, vertex_count, element_count;
+    int32_t vs, ps;
+    uint32_t textures[4], render_target, depth_surface;
+    uint32_t rs[16];             /* Z/blend/alpha/cull/write-mask state, documented by exporter */
+    uint32_t tss[4][2];          /* TEXCOORDINDEX, TEXTURETRANSFORMFLAGS */
+    uint32_t transform_mask;     /* bit0 world, bit1 view, bit2 projection */
+    float transforms[3][16];
+    GwProvElem elements[GW_PROV_ELEMS];
+} GwD3DDraw;
 
 /* One record.  Fields as in metal.m's MDraw, minus the HD-only ones (c0, gh). */
 typedef struct {
@@ -59,6 +81,7 @@ typedef struct {
     int32_t  ix_base;     /* indexed draw: BaseVertexIndex */
     uint32_t clip;        /* the 2D UI on a screen narrower than 4:3: rows y0 | y1 << 16 of the back buffer
                            * (its 4:3 band), the draw kept between them; 0 = the whole target (com.c) */
+    uint32_t prov;        /* GwD3DDraw index + 1; 0 when this draw is outside the scoped provenance trace */
 } GwDraw;
 
 typedef struct {
@@ -81,6 +104,7 @@ typedef struct {
      * D3DFMT_A8R8G8B8 is in memory).  The game waits in LockRect for it
      * (GwCtl.rb_want / rb_done); gpu_web.c metal_read_texture. */
     uint32_t rb_id, rb_tex, rb_dst, rb_pitch, rb_rows;
+    uint32_t prov_n, prov, prov_bytes_n, prov_bytes;
 } GwFrame;
 
 /* GwCtl.state: the handoff word.  bits 0-1 ready buffer + 1 (0 = none),
@@ -196,7 +220,8 @@ typedef struct { uint32_t magic, n, pad[2]; GwMark m[GW_MARKS_MAX]; } GwMarks;
 /* Layout word: changes whenever a struct above changes shape. */
 #define GW_LAYOUT ((uint32_t)(sizeof(GwDraw) | sizeof(GwFrame) << 8 | (sizeof(GwCtl) & 0xFFF) << 16) ^ (GW_VERSION << 28))
 
-_Static_assert(sizeof(GwDraw) == 156, "GwDraw");
+_Static_assert(sizeof(GwProvElem) == 10, "GwProvElem");
+_Static_assert(sizeof(GwDraw) == 160, "GwDraw");
 _Static_assert(offsetof(GwDraw, kind) == 16 && offsetof(GwDraw, aref) == 24 && offsetof(GwDraw, depth) == 28, "GwDraw a");
 _Static_assert(offsetof(GwDraw, ps) == 44 && offsetof(GwDraw, psci) == 48 && offsetof(GwDraw, vsid) == 52, "GwDraw b");
 _Static_assert(offsetof(GwDraw, rawoff) == 56 && offsetof(GwDraw, koff) == 60 && offsetof(GwDraw, proj) == 64, "GwDraw c");
@@ -204,15 +229,15 @@ _Static_assert(offsetof(GwDraw, smp) == 80 && offsetof(GwDraw, blit_src) == 96 &
 _Static_assert(offsetof(GwDraw, cull) == 104 && offsetof(GwDraw, fogv) == 108 && offsetof(GwDraw, clr_argb) == 124, "GwDraw e");
 _Static_assert(offsetof(GwDraw, clr_flags) == 128 && offsetof(GwDraw, clr_z) == 132 && offsetof(GwDraw, ksz) == 136, "GwDraw f");
 _Static_assert(offsetof(GwDraw, ix_isz) == 140 && offsetof(GwDraw, ix_ib) == 144 && offsetof(GwDraw, ix_base) == 148, "GwDraw g");
-_Static_assert(offsetof(GwDraw, clip) == 152, "GwDraw h");
-_Static_assert(sizeof(GwFrame) == 156 && offsetof(GwFrame, rq_end) == 44 && offsetof(GwFrame, dump_label) == 72, "GwFrame");
+_Static_assert(offsetof(GwDraw, clip) == 152 && offsetof(GwDraw, prov) == 156, "GwDraw h");
+_Static_assert(sizeof(GwFrame) == 172 && offsetof(GwFrame, rq_end) == 44 && offsetof(GwFrame, dump_label) == 72, "GwFrame");
 _Static_assert(offsetof(GwFrame, rb_id) == 136 && offsetof(GwFrame, rb_rows) == 152, "GwFrame rb");
 _Static_assert(offsetof(GwCtl, state) == 16 && offsetof(GwCtl, bell) == 20 && offsetof(GwCtl, attached) == 24, "GwCtl a");
 _Static_assert(offsetof(GwCtl, rq_head) == 28 && offsetof(GwCtl, rq_tail) == 32 && offsetof(GwCtl, rq_ptr) == 36, "GwCtl b");
 _Static_assert(offsetof(GwCtl, frames_done) == 44 && offsetof(GwCtl, view_w) == 48 && offsetof(GwCtl, features) == 60, "GwCtl c");
 _Static_assert(offsetof(GwCtl, st_draws) == 64 && offsetof(GwCtl, st_pipelines) == 84 && offsetof(GwCtl, frame) == 96, "GwCtl d");
 _Static_assert(offsetof(GwCtl, rb_want) == 88 && offsetof(GwCtl, rb_done) == 92, "GwCtl e");
-_Static_assert(sizeof(GwCtl) == 96 + 2 * 156, "GwCtl");
+_Static_assert(sizeof(GwCtl) == 96 + 2 * 172, "GwCtl");
 _Static_assert(sizeof(GwVsync) == 32 && offsetof(GwVsync, ts_ms) == 8 && offsetof(GwVsync, hz) == 24, "GwVsync");
 _Static_assert(sizeof(GwCmd) == GW_CMD_HDR, "GwCmd");
 _Static_assert(sizeof(GwHLight) == 80 && sizeof(GwHL) == GW_HL_BYTES && offsetof(GwHL, l) == 16, "GwHL");
