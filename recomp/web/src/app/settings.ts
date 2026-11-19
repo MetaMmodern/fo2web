@@ -34,8 +34,7 @@ export interface KeyDef {
   /** 'mac': only the Mac app uses it (a Mac settings.ini restored into the browser keeps working;
    *  the line is noted and ignored).  'web': meaningful in the browser. */
   scope: 'web' | 'mac';
-  /** a setting of this device (its screen, GPU, sound output, controller, address on the LAN), not the player's: a
-   *  keyphrase's saves leave it out, and each browser keeps its own (withoutDevice, withDevice) */
+  /** a setting of this device (its screen, GPU, sound output, controller, address on the LAN), not the player's */
   device?: boolean;
 }
 
@@ -828,47 +827,6 @@ export function settingsPut(text: string | null, key: string, value: string | nu
     if (lines.length && lines[lines.length - 1] === '') lines.splice(lines.length - 1, 0, nl); else lines.push(nl);
   }
   return lines.join('\n');
-}
-
-/** the variables of the device's own settings (KeyDef.device): a line sets one by its key, or by the variable's name */
-const DEVICE_ENV = new Set(KEYS.filter(k => k.device).map(k => k.env));
-/** the key a line sets (not a comment, section or blank line), if it sets a device's own setting */
-function deviceKey(line: string): string | undefined {
-  const p = trim(line), eq = p.indexOf('=');
-  if (!p || p[0] === '#' || p[0] === ';' || p[0] === '[' || eq < 0) return undefined;
-  const key = trim(p.slice(0, eq));
-  return DEVICE_ENV.has(envNameOf(key)) ? key : undefined;
-}
-
-/**
- * A settings.ini without the device's own settings (KeyDef.device), as a keyphrase keeps it: a line that sets one is
- * its template line again ("#fps = auto"), and one that sets its variable by name ("NFSU2_FPS = 30") goes.
- */
-export function withoutDevice(text: string): string {
-  const out: string[] = [];
-  for (const l of text.split('\n')) {
-    const key = deviceKey(l), d = key ? keyDef(key) : undefined;
-    if (!key) out.push(l);
-    else if (d) out.push(`#${d.key} = ${DEFAULTS.get(d.key) ?? ''}`.replace(/ = $/, ' ='));
-  }
-  return out.join('\n');
-}
-
-/**
- * Another browser's settings.ini (theirs, from a keyphrase; null: none) with this browser's own device settings
- * (mine: its settings.ini now), each in the place of its template line.  Null when there is neither.
- */
-export function withDevice(theirs: string | null, mine: string | null): string | null {
-  let out = theirs === null ? null : withoutDevice(theirs);
-  const seen = new Set<string>();
-  for (const l of mine === null ? [] : mine.split('\n')) {
-    const key = deviceKey(l), env = key && envNameOf(key);
-    if (!key || seen.has(env!)) continue;               // only the first line of a variable sets it
-    seen.add(env!);
-    const p = trim(l), eq = p.indexOf('=');
-    out = settingsPut(out, key, trim(p.slice(eq + 1)));
-  }
-  return out;
 }
 
 /**

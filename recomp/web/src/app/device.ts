@@ -31,8 +31,7 @@ export function deviceDefaults(): Record<string, string> {
   return isPhone() ? { render: rememberedRender() === 'backing' ? 'backing' : 'scale:0.75', fullscreen: 'on' } : {};
 }
 
-/** the render check's verdict on this phone: in this browser only, like the other device defaults (settings.ini,
- *  and with it the cloud saves, never has it) */
+/** the render check's verdict on this phone: in this browser only, like the other device defaults in settings.ini */
 const RENDER_KEY = 'nfsu2.device.render';
 export function rememberedRender(): string | null {
   try { return localStorage.getItem(RENDER_KEY); } catch { return null; }
