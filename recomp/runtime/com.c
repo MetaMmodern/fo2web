@@ -1487,18 +1487,19 @@ static int g_gpuvs = -1;
 static uint64_t g_gpuvs_draws = 0, g_gpuvs_fail = 0, g_gpuvs_drop = 0;
 /* Inferred-layout accounting for the exit summary (no per-draw log). */
 static uint64_t g_gpuvs_inferred = 0, g_gpuvs_inferred_fail = 0;
-/* Inferred declaration-less stream kinds: 0=12, 1=24, 2=28, 3=40 bytes.
+/* Inferred declaration-less stream kinds: 0=12, 1=20, 2=24, 3=28, 4=40 bytes.
  * g_inf_* record matched draws by vertex path; g_inf_miss counts sizes whose
  * shader did not match the authored format.  Exit summary only. */
-static uint64_t g_inf_miss[4] = { 0, 0, 0, 0 };
-static uint64_t g_inf_gpu[4] = { 0, 0, 0, 0 }, g_inf_cpu[4] = { 0, 0, 0, 0 };
-static const uint32_t g_inf_stride[4] = { 12u, 24u, 28u, 40u };
+static uint64_t g_inf_miss[5] = { 0, 0, 0, 0, 0 };
+static uint64_t g_inf_gpu[5] = { 0, 0, 0, 0, 0 }, g_inf_cpu[5] = { 0, 0, 0, 0, 0 };
+static const uint32_t g_inf_stride[5] = { 12u, 20u, 24u, 28u, 40u };
 static int inf_kind(uint32_t stride){
     switch (stride){
     case 12u: return 0;
-    case 24u: return 1;
-    case 28u: return 2;
-    case 40u: return 3;
+    case 20u: return 1;
+    case 24u: return 2;
+    case 28u: return 3;
+    case 40u: return 4;
     default:  return -1;
     }
 }
@@ -2027,6 +2028,7 @@ static uint64_t g_dip_ix = 0, g_dip_ixfb[6];
  * (another layout can share it), so resolve by the semantics the shader itself
  * declares.  The formats come from the authored shaders:
  *   Pos         12 bytes: POSITION0 @0 FLOAT3                       (rendertarget shadow)
+ *   PosTex1     20 bytes: POSITION0 @0 FLOAT3, TEXCOORD0 @12 FLOAT2 (TV cameras)
  *   PosColorTex1 24 bytes: POSITION0 @0, COLOR0 @12 D3DCOLOR,
  *                          TEXCOORD0 @16 FLOAT2                    (dynamic shadow / HUD)
  *   PosTex2     28 bytes: POSITION0 @0, TEXCOORD0 @12, TEXCOORD1 @20 (lightmapped terrain)
@@ -2044,6 +2046,9 @@ static int flatout_inferred_layout(const VSProg *prog, uint32_t stride, DElem *e
     int nw = 0;
     if (stride == 12u){
         want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+    } else if (stride == 20u){
+        want[nw].us = 0; want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
+        want[nw].us = 5; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 1; nw++;
     } else if (stride == 24u){
         want[nw].us = 0;  want[nw].ui = 0; want[nw].off = 0;  want[nw].type = 2; nw++;
         want[nw].us = 10; want[nw].ui = 0; want[nw].off = 12; want[nw].type = 4; nw++;
@@ -2158,7 +2163,7 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
      * quad, the 28/40-byte terrain streams and the 32/36-byte car streams
      * have different layouts.  Treating every stride >= 24 as the quad read
      * car normals as UVs and color. */
-    if (!ep && prog && (stride == 12u || stride == 24u || stride == 28u || stride == 40u)){
+    if (!ep && prog && (stride == 12u || stride == 20u || stride == 24u || stride == 28u || stride == 40u)){
         int n = flatout_inferred_layout(prog, stride, el);
         int k = inf_kind(stride);
         if (n > 0){
@@ -5882,10 +5887,10 @@ void com_report(void){
                 (unsigned long long)g_gpuvs_inferred,
                 (unsigned long long)g_gpuvs_inferred_fail);
     { int any = 0, miss = 0;
-      for (int k = 0; k < 4; k++){ if (g_inf_gpu[k] || g_inf_cpu[k]) any = 1; if (g_inf_miss[k]) miss = 1; }
+      for (int k = 0; k < 5; k++){ if (g_inf_gpu[k] || g_inf_cpu[k]) any = 1; if (g_inf_miss[k]) miss = 1; }
       if (any){
           fprintf(stderr,"  inferred meshes   :");
-          for (int k = 0; k < 4; k++)
+          for (int k = 0; k < 5; k++)
               if (g_inf_gpu[k] || g_inf_cpu[k])
                   fprintf(stderr," %ub %lluG/%lluC", g_inf_stride[k],
                           (unsigned long long)g_inf_gpu[k], (unsigned long long)g_inf_cpu[k]);
@@ -5893,7 +5898,7 @@ void com_report(void){
       }
       if (miss){
           fprintf(stderr,"  inferred fallbacks:");
-          for (int k = 0; k < 4; k++)
+          for (int k = 0; k < 5; k++)
               if (g_inf_miss[k])
                   fprintf(stderr," %ub %llu", g_inf_stride[k], (unsigned long long)g_inf_miss[k]);
           fprintf(stderr," (fixed-function: no vertex shader)\n");
