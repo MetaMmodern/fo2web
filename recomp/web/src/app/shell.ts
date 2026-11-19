@@ -139,6 +139,39 @@ function setProgress(f: number) {
   $('#progress-fill').style.width = `${(v * 100).toFixed(1)}%`;
   $('#progress').setAttribute('aria-valuenow', String(Math.round(v * 100)));
 }
+/** The module's manifest gives an exact decoded byte size (build.sh). */
+function showModuleProgress(got: number, total: number) {
+  setProgress(total ? got / total : 0);
+  const text = total
+    ? T('Loading the game: {got} of {total}.', { got: fmtBytes(got), total: fmtBytes(total) })
+    : T('Loading the game.');
+  $('#progress').setAttribute('aria-valuetext', text());
+  if (phase === 'boot') setSub(text);
+}
+const dataDownloads = new Map<number, { got: number; total: number }>();
+let dataTotal = 0, dataDownloaded = 0, dataHideTimer: ReturnType<typeof setTimeout> | undefined;
+function showDataDownload(id: number, got: number, total: number, downloaded: number) {
+  clearTimeout(dataHideTimer);
+  dataDownloaded = downloaded;
+  dataDownloads.set(id, { got, total });
+  const active = [...dataDownloads.values()].reduce((sum, x) => sum + x.got, 0);
+  const el = $('#data-loading');
+  const text = `${fmtBytes(dataDownloaded + active)} / ${fmtBytes(dataTotal || total)}`;
+  $('#data-loading-count').textContent = text;
+  el.setAttribute('aria-label', `${t('Loading')}: ${text}`);
+  el.hidden = false;
+}
+function finishDataDownload(id: number) {
+  dataDownloads.delete(id);
+  if (!dataDownloads.size) dataHideTimer = setTimeout(() => { if (!dataDownloads.size) $('#data-loading').hidden = true; }, 700);
+}
+function setDataTotal(bytes: number) { dataTotal = bytes; }
+function clearDataDownloads() {
+  clearTimeout(dataHideTimer);
+  dataDownloads.clear();
+  dataTotal = dataDownloaded = 0;
+  $('#data-loading').hidden = true;
+}
 
 // --------------------------------------------------------------- status --
 /** the headline and the line under it (in the page's language, again when it changes); code: a problem's */
@@ -486,7 +519,7 @@ async function startGame() {
     // scope, and with it this game, reachable
     session = await GameSession.start({
       module: loaded!.module, info: loaded!.info, saveDir: SAVE, env: r.env, canvas, stage, audio, displayHz, netName, notice, lobby, say, marks,
-      netBack, netQueue, onSaved,
+      netBack, netQueue, onSaved, onDataProgress: showDataDownload, onDataDone: finishDataDownload, onDataTotal: setDataTotal,
       netId: net ? pageId() : undefined, netRemoved,
       artifacts: q.get('artifacts') ?? undefined, dumpScale: q.get('dumpscale') ? +q.get('dumpscale')! : undefined,
       toggleFullscreen, padPage: PAD_PAGE, log: logLine, onFatal: stopFatal,
@@ -626,6 +659,7 @@ let pauseHint: PauseHint;               // the line to the page's menu under the
 let driftPanel: DriftPanel;             // free roam's drift mode: its score under the game's Bank panel, a note at F2 (drift.ts)
 
 function endStage() {
+  clearDataDownloads();
   touch.stop();
   textField.stop();
   pauseHint.stop();
@@ -1064,8 +1098,7 @@ async function loadModule() {
     : check('module', N('Game module'), 'pending', N('Loading.')));
   try {
     loaded = await loadGame((got, total) => {
-      setProgress(total ? got / total : 0);
-      if (phase === 'boot') setSub(T('Loading the game: {got} of {total}.', { got: fmtBytes(got), total: fmtBytes(total) }));
+      showModuleProgress(got, total);
     });
     setProgress(1);
     log.add(`[app] game module ${loaded.info.rev}: ${fmtBytes(loaded.info.size)} in ${loaded.ms.toFixed(0)} ms, ${loaded.transferred} bytes transferred${moduleFails ? `, after ${moduleFails} failed attempts` : ''}`);

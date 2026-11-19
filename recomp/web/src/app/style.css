@@ -435,6 +435,33 @@ html:has(> body > .stage:not([hidden])) { overflow: hidden; }
 }
 .stage-menu svg { display: block; width: calc(24px * var(--ts)); height: calc(24px * var(--ts)); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .stage-menu:active { background: rgba(0, 0, 0, 0.72); color: var(--lime); }
+/* On-demand game files: only visible while an uncached block is arriving. */
+.data-loading {
+  position: absolute; z-index: 2; top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right));
+  display: flex; align-items: center; gap: 6px; min-width: 240px; padding: 7px 12px; border: 1px solid #68543a; border-radius: 2px;
+  background: rgba(8, 7, 6, 0.84); color: #ffd065; font-variant-numeric: tabular-nums; pointer-events: none;
+  opacity: 1; transform: scale(.9); transform-origin: top right; transition: opacity 180ms ease-in;
+}
+.data-loading[hidden] { display: flex !important; opacity: 0; visibility: hidden; transition: opacity 500ms ease-out, visibility 0s linear 500ms; }
+.data-bars { display: flex; gap: 4px; transform: skewX(-16deg); }
+.data-bars i {
+  width: 8px; height: 22px; background: linear-gradient(to bottom, #fff0a0, #ffba26 34%, #ed7105 72%, #ffb01c);
+  box-shadow: 0 0 8px #ff9e1b88; opacity: .22; animation: data-bar-chase 900ms ease-in-out infinite;
+}
+.data-bars i:nth-child(2) { animation-delay: 100ms; }
+.data-bars i:nth-child(3) { animation-delay: 200ms; }
+.data-bars i:nth-child(4) { animation-delay: 300ms; }
+#data-loading-count {
+  display: block; margin-left: auto; transform: skewX(-10deg); color: #ffd065; font: italic 800 18px/22px var(--display);
+  letter-spacing: .045em; text-align: right; text-shadow: 1px 2px #000; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+@keyframes data-bar-chase {
+  0%, 18% { opacity: .2; transform: translateY(0); }
+  35%, 58% { opacity: 1; transform: translateY(-1px); }
+  76%, 100% { opacity: .2; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) { .data-bars i { animation: none; opacity: .75; } }
+html[data-touch] .data-loading { top: calc(max(16px, env(safe-area-inset-top)) + 60px * var(--ts)); }
 /* touch controls (touch.ts) while the player drives: dim and see-through like the menu's button, lime while
  * pressed.  The small round ones in a row after the menu's button (the mode button and tilt's straight-ahead top
  * right), the left thumb's bottom left, the right thumb's bottom right; free roam adds a row's end and Start. */
@@ -1124,6 +1151,7 @@ body:is([data-phase=ready], [data-phase=exited], [data-phase=preview]) #progress
   font-size: 12px;
   line-height: 1.5;
 }
+
 .dlg {
   background: #1b1813;
   border: 1px solid #c18f3a;

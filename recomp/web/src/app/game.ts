@@ -45,6 +45,12 @@ export interface SessionOptions {
   netRemoved?(r: NetRemoved): void;
   /** the game finished writing a file of the save overlay (path relative to /save) */
   onSaved?(path: string): void;
+  /** an on-demand game-data block is downloading */
+  onDataProgress?(id: number, got: number, total: number, downloaded: number): void;
+  /** an on-demand game-data block completed or failed */
+  onDataDone?(id: number): void;
+  /** the full size of the game data the server can provide */
+  onDataTotal?(bytes: number): void;
   /** tests: where frame dumps go, and their scale */
   artifacts?: string; dumpScale?: number;
   toggleFullscreen(): void;
@@ -96,6 +102,9 @@ export class GameSession {
       onLog: (line, fd, t) => o.log(`${tid(t, fd)} ${line}`),
       onSaved: o.onSaved,
       onNote: o.log,
+      onDataProgress: o.onDataProgress,
+      onDataDone: o.onDataDone,
+      onDataTotal: o.onDataTotal,
     });
     s.exited = s.proc.exited.then(code => { s.exitCode = code; s.detach(); return code; });
     void s.proc.registered(HostKind.Status).then(r => { if (!s.detached) s.status = new StatusReader(s.proc.memory, r.ptr); });

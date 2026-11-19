@@ -29,7 +29,7 @@ const dv = () => new DataView(memory.buffer);
 
 // ---------------------------------------------------------------- /data ----
 interface DNode { name: string; dir: boolean; size: number; mtime: number; kids?: Map<string, DNode>; byLower?: Map<string, DNode>; path: string; ino: number }
-let dataRoot: DNode;
+let dataRoot: DNode, dataTotal = 0, dataDownloaded = 0;
 let inoNext = 16;
 let runs: { url: string; max: number } | null = null;     // the server's compressed blocks (datacache.ts blockRuns)
 function mkdirNode(name: string, path: string): DNode { return { name, dir: true, size: 0, mtime: 0, kids: new Map(), byLower: new Map(), path, ino: inoNext++ }; }
@@ -39,6 +39,7 @@ async function loadManifest() {
   if (!r.ok) throw new Error(`manifest: HTTP ${r.status}`);
   const m = await r.json() as Manifest;
   runs = blockRuns(m);
+  dataTotal = m.files.reduce((sum, f) => sum + (f.d ? 0 : f.s ?? 0), 0);
   dataRoot = mkdirNode('', '');
   for (const f of m.files) {
     const parts = f.p.split('/');
@@ -111,6 +112,10 @@ function memPut(key: string, b: Uint8Array) {
 }
 // a line for the game's log (F9 > Download log), as "[data] ...": what a read waited for on the server
 const note = (s: string) => (self as unknown as Worker).postMessage({ t: 'log', s });
+let nextDownload = 1;
+const dataProgress = (id: number, got: number, total: number) =>
+  (self as unknown as Worker).postMessage({ t: 'data-progress', id, got, total, downloaded: dataDownloaded });
+const dataDone = (id: number) => (self as unknown as Worker).postMessage({ t: 'data-done', id });
 // At most FETCHES block requests in flight (the server holds each client address to 64 requests at once, so a
 // household of players behind one address stays well inside it).  A block comes compressed when the server offers
 // it (the browser undoes the Content-Encoding), else as a byte range of the file.  A try that fails on the way (no
@@ -138,7 +143,7 @@ function faults() {
 }
 /** one try: the block (as a byte range of the file, or the server's compressed run of it), or why it failed and
  *  whether asking again can help (lost: no answer at all) */
-async function fetchOnce(url: string, start: number, len: number, ranged: boolean, lose: boolean):
+async function fetchOnce(url: string, start: number, len: number, ranged: boolean, lose: boolean, progress: (got: number) => void):
     Promise<Uint8Array | { why: string; again: boolean; size?: boolean; lost?: boolean }> {
   const f = faults(), ac = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -160,7 +165,7 @@ async function fetchOnce(url: string, start: number, len: number, ranged: boolea
       alive();
       const { done, value } = await rd.read();
       if (done) break;
-      parts.push(value); got += value.length;
+      parts.push(value); got += value.length; progress(Math.min(got, len));
     }
     let b = new Uint8Array(got);
     for (let i = 0, o = 0; i < parts.length; o += parts[i].length, i++) b.set(parts[i], o);
@@ -187,13 +192,17 @@ async function fetchBlock(n: DNode, bi: number, start: number, len: number): Pro
   while (fetching >= FETCHES) await new Promise<void>(r => fetchWait.push(r));
   fetching++;
   const what = `${n.path} block ${bi}`, t0 = performance.now();
+  const download = nextDownload++;
   const slow = setTimeout(() => note(`[data] ${what}: waiting for the server for ${SLOW_MS / 1000} s`), SLOW_MS);
   try {
     const run = runs ? runUrl(runs.url, n.path, bi, 1, n) : null, range = dataUrl(cfg.dataBase, n.path), f = faults();
     for (let k = 1, wait = 250, sized = 0, lost = 0; ; k++, wait = Math.min(wait * 2, 8000)) {
       const ranged = !run || lost >= 2 && k % 2 === 1, by = run && ranged ? ' (as a byte range)' : '';
-      const r = await fetchOnce(ranged ? range : run, start, len, ranged, !ranged && f.deny > 0 && (bi + 1) % f.deny === 0);
+      dataProgress(download, 0, len);
+      const r = await fetchOnce(ranged ? range : run, start, len, ranged, !ranged && f.deny > 0 && (bi + 1) % f.deny === 0,
+        got => dataProgress(download, got, len));
       if (r instanceof Uint8Array) {
+        dataDownloaded += r.length;
         const s = (performance.now() - t0) / 1000;
         sum.fetched++; sum.bytes += r.length; sum.ms += s * 1000; if (s * 1000 > sum.maxMs) sum.maxMs = s * 1000;
         if (k > 1 || s >= SLOW_MS / 1000) note(`[data] ${what}: in after ${s.toFixed(1)} s${k > 1 ? `, ${k} tries` : ''}${by}`);
@@ -205,7 +214,7 @@ async function fetchBlock(n: DNode, bi: number, start: number, len: number): Pro
       if (k <= 3 || k % 10 === 0) note(`[data] ${what}: ${r.why}${by}; again in ${wait / 1000} s (try ${k + 1})`);
       await new Promise(res => setTimeout(res, wait));
     }
-  } finally { clearTimeout(slow); fetching--; fetchWait.shift()?.(); }
+  } finally { clearTimeout(slow); dataDone(download); fetching--; fetchWait.shift()?.(); }
 }
 // A block this PC has no room to keep (a full disk, or the browser's share of it used up: "No space available for
 // this operation") ends the keeping for this game, not the read: the game has the bytes either way.  (Thrown into
@@ -536,7 +545,7 @@ onmessage = async (e: MessageEvent<Init>) => {
     fds.set(3, { mount: 'data', kind: 'dir', path: '', pos: 0, append: false, node: dataRoot, preopen: '/data' });
     fds.set(4, { mount: 'save', kind: 'dir', path: '', pos: 0, append: false, dh: saveRoot, preopen: '/save' });
     fds.set(5, { mount: 'dev', kind: 'dir', path: '', pos: 0, append: false, preopen: '/dev' });
-    (self as unknown as Worker).postMessage({ t: 'io-ready', files: inoNext });
+    (self as unknown as Worker).postMessage({ t: 'io-ready', files: inoNext, dataTotal });
     void serve();
   } catch (err) {
     (self as unknown as Worker).postMessage({ t: 'io-error', msg: String(err) });

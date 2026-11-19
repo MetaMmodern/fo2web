@@ -263,6 +263,10 @@
 
 <div class="stage" id="stage" hidden>
   <button type="button" class="stage-menu" id="stage-menu" tabindex="-1" data-i18n-attr="aria-label" aria-label="Menu" data-nfsu2-ui hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg></button>
+  <div class="data-loading" id="data-loading" role="status" aria-live="polite" hidden>
+    <span class="data-bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <span id="data-loading-count"></span>
+  </div>
   <div class="hud-fps" id="fps" hidden></div>
   <div class="toasts">
     <div class="toast queue" id="queue" hidden></div>

@@ -6,7 +6,6 @@
 - Low graphics settings previously produced incorrect visuals; thoroughly test and fix every visual quality level.
 - Visual artifacts appear when entering certain stunts; capture a GPU trace and screenshot to diagnose and fix them.
 - Touchscreen driving controls are incomplete, and changing the steering type has no apparent effect; verify and fix the controls for FlatOut.
-- Show a loading indicator (for example, in the top-right corner) while game resources download, with progress such as “X of Y MB downloaded.” Determine whether the required resource size is available to report accurately.
 - The start page once failed to load after the language picker was removed; the cause is unclear, and the issue is believed to be fixed. Confirm before launch.
 - Online car selection occasionally showed rapid jumps between rotation angles, but this has not been reproducible recently; monitor for recurrence.
 - Intro video frame-rate drops are no longer observed; monitor for recurrence.

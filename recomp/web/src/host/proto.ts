@@ -51,6 +51,9 @@ export interface BootConfig {
 
 export type ToPage =
   | { t: 'log'; s: string; fd: number; tid: number }
+  /** Progress of one on-demand game-data block download. */
+  | { t: 'data-progress'; id: number; got: number; total: number; downloaded: number }
+  | { t: 'data-done'; id: number }
   | { t: 'exit'; code: number }
   | { t: 'trap'; tid: number; msg: string; stack?: string }
   | { t: 'ready'; slot: number }

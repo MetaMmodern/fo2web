@@ -17,6 +17,12 @@ export interface ProcessOptions {
   onSaved?: (path: string) => void;
   /** a line of the host's own for the log, from no game thread (the I/O worker's "[data] ...") */
   onNote?: (s: string) => void;
+  /** one on-demand game-data download's current decoded bytes */
+  onDataProgress?: (id: number, got: number, total: number, downloaded: number) => void;
+  /** an on-demand game-data download ended, successfully or not */
+  onDataDone?: (id: number) => void;
+  /** the full size of the game data the server can provide */
+  onDataTotal?: (bytes: number) => void;
 }
 
 export interface GameProcess {
@@ -62,6 +68,8 @@ export async function startProcess(o: ProcessOptions): Promise<GameProcess> {
   const onMsg = (e: MessageEvent<ToPage | { t: 'register'; kind: number; ptr: number; size: number }>) => {
     const m = e.data;
     if (m.t === 'log') o.onLog?.(m.s, m.fd, m.tid);
+    else if (m.t === 'data-progress') o.onDataProgress?.(m.id, m.got, m.total, m.downloaded);
+    else if (m.t === 'data-done') o.onDataDone?.(m.id);
     else if (m.t === 'trap') o.onLog?.(`TRAP in thread ${m.tid}: ${m.msg}\n${m.stack ?? ''}`, 2, m.tid);
     else if (m.t === 'pool') topUp();
     else if (m.t === 'exit') {
@@ -79,10 +87,19 @@ export async function startProcess(o: ProcessOptions): Promise<GameProcess> {
   const io = new Worker(new URL('/host/io-worker.js', import.meta.url), { type: 'module', name: 'io' });
   workers.push(io);
   await new Promise<void>((res, rej) => {
-    io.onmessage = (e) => { if (e.data.t === 'io-ready') res(); else if (e.data.t === 'io-error') rej(new Error(e.data.msg)); };
+    io.onmessage = (e) => {
+      if (e.data.t === 'io-ready') { o.onDataTotal?.(e.data.dataTotal); res(); }
+      else if (e.data.t === 'io-error') rej(new Error(e.data.msg));
+    };
     io.postMessage({ memory, ctl: ctlBuf, rpc, cfg });
   });
-  io.onmessage = (e) => { if (e.data.t === 'saved') o.onSaved?.(e.data.path); else if (e.data.t === 'log') o.onNote?.(e.data.s); };
+  io.onmessage = (e: MessageEvent<ToPage | { t: 'saved'; path: string }>) => {
+    const m = e.data;
+    if (m.t === 'saved') o.onSaved?.(m.path);
+    else if (m.t === 'log') o.onNote?.(m.s);
+    else if (m.t === 'data-progress') o.onDataProgress?.(m.id, m.got, m.total, m.downloaded);
+    else if (m.t === 'data-done') o.onDataDone?.(m.id);
+  };
 
   for (let s = 0; s < pool; s++) ctl[CTL_POOL + 4 * s] = POOL_NONE;   // each worker makes its slot idle when ready
   let started = 0, starting = 0, mostBusy = 0;

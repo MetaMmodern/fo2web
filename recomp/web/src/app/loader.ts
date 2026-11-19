@@ -32,7 +32,14 @@ async function fetchModule(signal?: AbortSignal) {
 export async function loadGame(onProgress: (got: number, total: number) => void, signal?: AbortSignal): Promise<Loaded> {
   const t0 = performance.now();
   const { info, url, r } = await fetchModule(signal);
-  const total = info.size || +(r.headers.get('content-length') ?? 0);
+  // build.sh records the uncompressed module size in game.json.  A response's
+  // Content-Length is only usable as a fallback when it is not encoded: the
+  // stream below contains decoded bytes, while Content-Length would count the
+  // compressed transfer.
+  const manifestSize = Number.isFinite(info.size) && info.size > 0 ? info.size : 0;
+  const contentLength = +(r.headers.get('content-length') ?? 0);
+  const total = manifestSize || (!r.headers.get('content-encoding') && Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0);
+  onProgress(0, total);
   const counting = (async () => {
     const rd = r.clone().body!.getReader();
     let got = 0;
