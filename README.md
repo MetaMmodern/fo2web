@@ -8,6 +8,15 @@ audio, filesystem and input interfaces, with Direct3D implemented over WebGPU.
 This is **not** a Three.js recreation and it does not contain FlatOut code,
 executables, music, textures, or other game assets.
 
+## Play
+
+Production: [flatout2.online](https://flatout2.online)
+
+## Deployment
+
+Production deployment architecture, release procedures, rollback, and security
+notes are documented in [Deployment](docs/DEPLOYMENT.md).
+
 ## Current target binary
 
 | Field | Value |

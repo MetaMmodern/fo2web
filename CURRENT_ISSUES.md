@@ -1,20 +1,16 @@
 # Current issues
 
-- Public launch priority: add online mode.
-- Public launch priority: replace NFS branding and names throughout the website UI and restyle it.
-- Public launch priority: configure a better domain.
-- Public launch priority: automate deployment.
+- Audit production server load and security; address any risks found.
+- Multiplayer search, joining, hosting, and racing have been verified for browser guests, remote players joining a browser host, and same-LAN players joining a browser host. However, players occasionally see “no players left” just before a race starts; investigate this intermittent failure.
+- Compared with the original at the same settings, the overall image looks somewhat bleached, as if some shaders or overall glow and sunbeams are missing. Investigate shader/effect coverage against the original.
+- Low graphics settings previously produced incorrect visuals; thoroughly test and fix every visual quality level.
+- Visual artifacts appear when entering certain stunts; capture a GPU trace and screenshot to diagnose and fix them.
+- Touchscreen driving controls are incomplete, and changing the steering type has no apparent effect; verify and fix the controls for FlatOut.
+- Show a loading indicator (for example, in the top-right corner) while game resources download, with progress such as “X of Y MB downloaded.” Determine whether the required resource size is available to report accurately.
+- The start page once failed to load after the language picker was removed; the cause is unclear, and the issue is believed to be fixed. Confirm before launch.
+- Online car selection occasionally showed rapid jumps between rotation angles, but this has not been reproducible recently; monitor for recurrence.
+- Intro video frame-rate drops are no longer observed; monitor for recurrence.
+- GPU Inspector capture download is fixed, as far as currently known.
 - Widescreen support is postponed; the game intentionally uses its original 4:3 presentation for now. Previous experiments are recorded in `recomp/FLATOUT_WIDESCREEN.md`.
-- Multiplayer online verification:
-
-  | role | search | join | race |
-  |---|---|---|---|
-  | browser as guest (any network) | done | done | done |
-  | browser as host, remote players | done | done | done |
-  | browser as host, same-LAN player | done | done | done |
-
-  Browser hosting (same-LAN and cross-network) is fixed, documented in `recomp/FLATOUT_HOSTING.md`. The relay presents each hosted client under a consistent identity — a LAN-listener (private) client under `HOSTED_PEER_VIP:<syn>` with its join packet's reported address rewritten to that identity, a public client under its own public address with its reported private address mapped back to the real endpoint — and translates the host's replies both ways. The switch routes `HOSTED_PEER_VIP` to the relay, and the page forwards every non-subnet UDP to the gateway for the server to validate. NAT negotiation itself passes through to OpenSpy untouched (terminating it would stop the host and guest from ever matching).
-- GPU Inspector can generate a capture but its download fails immediately with a browser connection error.
-- Daytime scenes have flatter lighting than the original; the remaining difference after the glow fixes needs confirmation.
-- A black square intermittently appears in the menu; it does not bother the user for now.
-- Painted road markings appear faded in sunlight compared with shade; compare with the original test track to determine whether this is expected.
+- Online mode and replacing NFS branding/names and restyling the website UI are done.
+- The black square that intermittently appeared in the menu is no longer observed.
