@@ -2,21 +2,19 @@
 // be renamed: profile.ts renameProfile), a backup of the whole save
 // overlay as a zip (profiles, registry.txt, settings.ini, screenshots) and
 // restoring one, or adding the PC game's profiles beside the ones here
-// (readBackup tells them apart), and the F12 screenshots (shots.ts); a keyphrase's saves come in as a
-// backup does (readVault, restoreVault: vault-ui.ts).  And the section at the bottom of the page, the game data on
-// this PC: how much of it, all of it downloaded ahead (predownload.ts), or
+// (readBackup tells them apart), and the F12 screenshots (shots.ts). And the
+// section at the bottom of the page, the game data on this PC: how much of it, all of it downloaded ahead (predownload.ts), or
 // deleted.  The game data is never part of a backup and never written back:
 // it stays on the server.
 
-import { cacheBytes, clearCache, clearSaveDir, filesOf, isScreenshot, listFiles, listProfiles, PROFILES_DIR, readBytes, readText, writeFile, type Profile } from './savefs';
+import { cacheBytes, clearCache, clearSaveDir, filesOf, isScreenshot, listFiles, listProfiles, PROFILES_DIR, readBytes, writeFile, type Profile } from './savefs';
 import { AUTOSAVE_SEEN, coverOf, isProfileFile, modCars, NAME_MAX, profileName, renameProfile, sealed, type RenameFiles } from './profile';
 import { listZip, unzip, zip, ZipError, type ZipEntry } from './zip';
 import { downloadBlob, stamp } from './logs';
 import { fmtBytes } from './checks';
-import { resolveEnv, withDevice } from './settings';
+import { resolveEnv } from './settings';
 import { gameDataKept, type DownloadState, type DownloadStatus, type Predownload } from './predownload';
 import { ScreenshotsPart } from './shots';
-import { kept } from './vault';
 import { dateLocale, listOf, live, N, t, tn, tvars, type Msg } from './i18n';
 
 export interface SavesDeps {
@@ -28,8 +26,6 @@ export interface SavesDeps {
   onRestored(): void;
   /** the download of the game data (all but the movies) ahead of play */
   download: Predownload;
-  /** the saves here changed (a rename, a restore): a keyphrase sends them */
-  onChanged?(): void;
 }
 
 // Limits for a restore, judged by each entry's declared size before anything is
@@ -187,36 +183,6 @@ export async function restoreSaves(saveDir: string, r: Restore) {
   for (const e of r.entries) await writeFile(saveDir, e.path, e.data);
 }
 
-/**
- * A keyphrase's saves (vault.ts kept(): a zip of the save folder but the screenshots, the covers, the graphics options
- * and the device's own settings) as a backup of this page's, whatever is at their top: restoreVault puts them in place
- * of everything here.  The same checks as a backup's; what a keyphrase does not keep is left out (in one sent before
- * 2026-10-25: covers, black ones as they were then, and the other browser's graphics options and device settings).
- */
-export async function readVault(buf: Uint8Array): Promise<Restore> {
-  const refused: string[] = [];
-  let other = 0;
-  const all = await unzip(buf, (name, size) => {
-    const p = safeEntryPath(name);
-    return !!p && !isScreenshot(p) && size <= MAX_ENTRY && ((other += size) <= MAX_OTHER || ((other -= size), false));
-  }, refused);
-  const files = all.map(e => ({ path: safeEntryPath(e.name)!, data: e.data, mtime: e.mtime }));
-  return backupIn(kept(files), refused);
-}
-
-/** readVault's saves in place of the ones here: everything goes but what a keyphrase does not keep (vault.ts kept()):
- *  the screenshots (and a test's input script), the DVD and magazine covers of the profiles they bring, the game's
- *  graphics options, and the device's own settings, which settings.ini keeps from the one here (settings.ts withDevice). */
-export async function restoreVault(saveDir: string, r: Restore) {
-  const names = new Set(r.profiles.map(lower)), dec = new TextDecoder();
-  const ini = r.entries.find(e => e.path === 'settings.ini');
-  const settings = withDevice(ini ? dec.decode(ini.data) : null, await readText(saveDir, 'settings.ini'));
-  await clearSaveDir(saveDir, name => isScreenshot(name) || name === 'autotest-script.txt' || name === 'registry.txt' || name === PROFILES_DIR);
-  await clearSaveDir(saveDir, name => names.has(lower(coverOf(name)?.profile ?? '')), PROFILES_DIR);
-  for (const e of r.entries) if (e !== ini) await writeFile(saveDir, e.path, e.data);
-  if (settings !== null) await writeFile(saveDir, 'settings.ini', settings);
-}
-
 /** What a restore's question says of its profiles' state: changed by a save editor, mod cars, left out, skipped. */
 function restoreNotes(r: Restore): string[] {
   const items: string[] = [];
@@ -232,14 +198,13 @@ function restoreNotes(r: Restore): string[] {
   return items;
 }
 
-/** What a backup's restore brings (or a keyphrase's, vault-ui.ts: the game's options stay), its profiles, the game's
- *  options, settings.ini, restoreNotes. */
-export function backupItems(r: Restore, vault = false): string[] {
+/** What a backup's restore brings: its profiles, the game's options, settings.ini, restoreNotes. */
+export function backupItems(r: Restore): string[] {
   const ini = r.entries.find(e => e.path === 'settings.ini');
   const warn = ini ? settingsWarnings(new TextDecoder().decode(ini.data)) : [];
   return [
     r.profiles.length ? t('Profiles: {names}', { names: r.profiles.join(', ') }) : t('No profiles'),
-    ...vault ? [] : [r.entries.some(e => e.path === 'registry.txt') ? t('The game\'s options (registry.txt)') : t('No registry.txt: the next launch starts with fresh game options')],
+    r.entries.some(e => e.path === 'registry.txt') ? t('The game\'s options (registry.txt)') : t('No registry.txt: the next launch starts with fresh game options'),
     ini ? (warn.length ? `settings.ini. ${warn.join(' ')}` : 'settings.ini') : t('No settings.ini: the defaults apply'),
     ...restoreNotes(r),
   ];
@@ -453,7 +418,6 @@ export class SavesPanel {
     if ('refused' in r) { ok.disabled = this.deps.busy(); say(r.refused); return; }
     this.renaming = null; this.focusName = to;
     this.msg(() => t('Renamed {from} to {to}.', { from, to }));
-    this.deps.onChanged?.();
     await this.refresh();
   }
 
@@ -536,7 +500,6 @@ export class SavesPanel {
       this.msg(() => adding ? t('Adding stopped halfway: {error}. Add the profiles again before playing.', { error: String(err) })
         : t('Restoring stopped halfway: {error}. Restore the backup again before playing.', { error: String(err) }));
     }
-    this.deps.onChanged?.();
     await this.refresh();
   }
 

@@ -44,7 +44,6 @@ import { askCrews, queueText, roomHash, serverAnswers, watchPlayers, type Player
 import { crewList, crewsOf, crewsValue, rgbsValue, rgbWords, type Crew } from './crews';
 import { SavesPanel } from './saves-ui';
 import { saveScreenshot } from './shots';
-import { forgetLink, VaultPanel } from './vault-ui';
 import { FpsOverlay, FPS_MODES, type FpsMode } from './overlay';
 import { LobbyPanel } from './lobby';
 import { ICON as CHAT_ICON, QuickChat } from './quickchat';
@@ -125,7 +124,6 @@ let quickChat: QuickChat;                // free roam's fixed phrases (quickchat
 let settings: SettingsPanel;
 let players: { now(): void; last(): PlayerCounts | null; fresh(ms: number): Promise<PlayerCounts | null> } | null = null;
 let saves: SavesPanel;
-let vault: VaultPanel;
 let download: Predownload;
 /** the server does not answer: the page and the module came from this browser's copies (sw.ts), and a game
  *  runs from the game data on this PC */
@@ -439,9 +437,6 @@ async function startGame() {
   await Promise.race([refreshMeasured, new Promise(r => setTimeout(r, 2000))]);
   canvas.focus();
 
-  // the keyphrase's newer saves from another browser (4 s at most), then what the Saves section is writing (a rename,
-  // a restore) ends first
-  if (await vault.beforePlay()) await loadSettings();
   await saves.settled();
   // the save overlay: registry seed (bundle.m app_seed_registry), test inputs
   const host: Record<string, string> = {
@@ -721,7 +716,6 @@ function onExit(s: GameSession, code: number) {
     });
   }
   void saves.refresh();               // new or changed profiles
-  vault.gameEnded();                  // and to the keyphrase with them
   showNewer();                        // the note on the log, now that there is one
   void checkNewer();
 }
@@ -733,7 +727,6 @@ function onSaved(path: string) {
   saved = { name: p[1], at: Date.now(), count: (saved?.count ?? 0) + 1 };
   log.add(`[app] the game saved profile ${p[1]} (${saved.count} this game)`);
   if (session) toast(t('Progress saved ({name}).', { name: p[1] }), 2500);
-  vault.saved();
   if ($<HTMLDialogElement>('#menu').open) $('#menu-save').textContent = t('Last saved at {when} ({name}).', { when: when(saved.at), name: saved.name });
 }
 /** the newest profile in this browser (listProfiles sorts by time), or null */
@@ -1272,11 +1265,10 @@ export async function boot() {
   // the language this browser showed last, at once (settings.ini says which it is: applyLanguage, once it is read)
   void setLanguage(lastLanguage(), logLine);
   settings = new SettingsPanel($('#settings'), {
-    // another language or texture pack counts other files as the game data (its pack); a keyphrase sends the file
     saveDir: SAVE, environment: ENVIRONMENT, defaults: DEVICE, onSaved: text => {
       const was = language() + '/' + texpack(); settingsText = text;
       if (language() + '/' + texpack() !== was) void saves.refresh();
-      vault?.changed(); players?.now();
+      players?.now();
       applyLanguage();
     },
     onLoaded: applyLanguage,
@@ -1300,12 +1292,7 @@ export async function boot() {
   download = new Predownload(s => saves.showData(s), logLine, () => language(), () => texpack());
   saves = new SavesPanel($('#saves'), $('#game-data'), {
     saveDir: SAVE, busy: () => !!session || starting || !instance.owner, confirm: confirmBox,
-    onRestored: () => { void loadSettings(); void settings.refresh(); }, download, onChanged: () => vault.changed(),
-  });
-  // keyphrase saves (on a server that keeps them): synced by the tab that owns the saves, once its settings are loaded
-  vault = new VaultPanel($('#vault'), {
-    saveDir: SAVE, owner: () => instance.owner, playing: () => !!session, busy: () => !!session || starting || !instance.owner,
-    confirm: confirmBox, onRestored: () => { void loadSettings(); void settings.refresh(); void saves.refresh(); }, log: logLine,
+    onRestored: () => { void loadSettings(); void settings.refresh(); }, download,
   });
   $<HTMLButtonElement>('#play').onclick = () => void play();
   $<HTMLButtonElement>('#retry').onclick = () => void loadModule();
@@ -1360,7 +1347,7 @@ export async function boot() {
   keySheet = controlsSheet($('#keys'), 'keys', { follow: true });
   // what the page drew itself, again in the language picked (the markup and the live texts redraw themselves)
   onLanguage(() => {
-    renderProblems(); evaluate(); settings.render(); void saves.refresh(); vault.refresh(); keySheet.relabel(); lobbyPanel.redraw(); touch.relabel();
+    renderProblems(); evaluate(); settings.render(); void saves.refresh(); keySheet.relabel(); lobbyPanel.redraw(); touch.relabel();
     helpSheet = null; $('#help-body').replaceChildren();
     syncPicker();
   });
@@ -1377,7 +1364,7 @@ export async function boot() {
     fullscreen: () => canFullscreen() || !fromHomeScreen(),
   });
   driftPanel = new DriftPanel($('#stage'), { toast, wide: () => hudWide, log: logLine });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { void checkNewer(); vault.shown(); } });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void checkNewer(); });
   setInterval(() => { if (document.visibilityState === 'visible') void checkNewer(); }, NEWER_EVERY_MS);
 
   setCheck(checkBrowser());
@@ -1390,12 +1377,11 @@ export async function boot() {
 
   showOverrides(given, dev);
   if (given.length) log.add(dev ? `[app] test settings from the page address: ${given.join(', ')}` : `[app] the page address's test settings (${given.join(', ')}) are ignored: not a development server`);
-  if (q.has('fresh') && SAVE !== 'save') { await removeSaveDir(SAVE); forgetLink(SAVE); log.add(`[app] fresh save folder ${SAVE}`); }
+  if (q.has('fresh') && SAVE !== 'save') { await removeSaveDir(SAVE); log.add(`[app] fresh save folder ${SAVE}`); }
   // the settings and saves show at once (read only until this tab owns the saves), and again once it does
   void settings.refresh();
   void saves.refresh();
-  void vault.start();
-  void instance.whenOwner.then(async () => { await loadSettings(); evaluate(); void settings.refresh(); void saves.refresh(); vault.ownerNow(); syncPicker(); });
+  void instance.whenOwner.then(async () => { await loadSettings(); evaluate(); void settings.refresh(); void saves.refresh(); syncPicker(); });
   void checkGpu().then(setCheck);
   // Firefox's answer to its storage prompt comes later: the check again then
   void checkStorage().then(({ answer, ...c }) => { setCheck(c); void answer?.then(setCheck); });
