@@ -862,8 +862,28 @@ static uint32_t d3dx_pixel(const uint8_t *p, unsigned f){
         return (a<<24)|(r<<16)|(g<<8)|b; }
     return p[0];
 }
+/* Focused, bounded diagnostic for low-quality UI sheets.  Frame
+ * captures preserve final texture contents but not the API call that supplied
+ * them, so this distinguishes a zero source from a dropped copy/upload. */
+static int ui_tex_trace_on(void){ return ENVC("FO2_UI_TEX_TRACE") != NULL; }
+static int ui_tex_trace_match(uint32_t w,uint32_t h,uint32_t fmt){
+    return ui_tex_trace_on() && w==512u && h==512u && fmt==0x33545844u;
+}
+static void ui_tex_trace_data(const char *op,uint32_t obj,uint32_t mid,
+                              const uint8_t *p,size_t n,uint32_t extra){
+    static unsigned shown;
+    if(shown++>=96u)return;
+    uint32_t hash=2166136261u,nz=0u;
+    if(n>262144u)n=262144u;
+    for(size_t i=0;p&&i<n;i++){uint8_t v=p[i];hash=(hash^v)*16777619u;nz+=(v!=0);}
+    fprintf(stderr,"[ui-tex] %s obj=%08x tid=%u bytes=%zu nz=%u hash=%08x extra=%u\n",
+            op,obj,mid,n,nz,hash,extra);
+}
 static void d3dx_upload_surface(uint32_t surface, uint32_t mid, const void *data,
                                 uint32_t pitch, uint32_t w, uint32_t h, uint32_t fmt){
+    if(ui_tex_trace_match(w,h,fmt))
+        ui_tex_trace_data("d3dx-upload",surface,mid,data,
+                          (size_t)pitch*metal_level_rows(h,0,fmt),pitch);
     uint32_t face_tag=MR32(surface+44u);
     if(face_tag>=1u && face_tag<=6u)
         metal_upload_texture_face(mid,0u,face_tag-1u,data,pitch,w,h,fmt);
@@ -890,10 +910,38 @@ static void d3dx_bc1_block(uint8_t *out,const uint32_t px[16]){
     }
     out[4]=(uint8_t)bits;out[5]=(uint8_t)(bits>>8);out[6]=(uint8_t)(bits>>16);out[7]=(uint8_t)(bits>>24);
 }
+static void d3dx_bc2_block(uint8_t *out,const uint32_t px[16]){
+    uint64_t alpha=0;
+    for(int i=0;i<16;i++){
+        unsigned a=(px[i]>>24)&255u;
+        alpha|=(uint64_t)((a*15u+127u)/255u)<<(4*i);
+    }
+    for(int i=0;i<8;i++)out[i]=(uint8_t)(alpha>>(8*i));
+    d3dx_bc1_block(out+8,px);
+}
+static uint32_t d3dx_bc2_pixel(const uint8_t *src,unsigned pitch,unsigned x,unsigned y){
+    const uint8_t *b=src+(size_t)(y>>2)*pitch+(size_t)(x>>2)*16u;
+    unsigned pi=((y&3u)<<2)|(x&3u);
+    unsigned a=((b[pi>>1]>>((pi&1u)*4u))&15u)*17u;
+    uint16_t c0=(uint16_t)(b[8]|((unsigned)b[9]<<8));
+    uint16_t c1=(uint16_t)(b[10]|((unsigned)b[11]<<8));
+    unsigned r[4],g[4],bl[4];
+    r[0]=((c0>>11)&31u)*255u/31u; g[0]=((c0>>5)&63u)*255u/63u; bl[0]=(c0&31u)*255u/31u;
+    r[1]=((c1>>11)&31u)*255u/31u; g[1]=((c1>>5)&63u)*255u/63u; bl[1]=(c1&31u)*255u/31u;
+    r[2]=(2u*r[0]+r[1])/3u; g[2]=(2u*g[0]+g[1])/3u; bl[2]=(2u*bl[0]+bl[1])/3u;
+    r[3]=(r[0]+2u*r[1])/3u; g[3]=(g[0]+2u*g[1])/3u; bl[3]=(bl[0]+2u*bl[1])/3u;
+    unsigned ci=(b[12+(pi>>2)]>>((pi&3u)*2u))&3u;
+    return (a<<24)|(r[ci]<<16)|(g[ci]<<8)|bl[ci];
+}
 int com_d3dx_load_surface(uint32_t surface, uint32_t dstrect, uint32_t src,
                           uint32_t srcfmt, uint32_t srcpitch, uint32_t srcrect){
     if (!surface || !com_valid(surface) || (CH_IFACE(surface) & 0xffffu) != IF_SURF || !src || !mem_is_committed(src)) return 0x80070057u;
     uint32_t w=MR32(surface+4), h=MR32(surface+8), fmt=MR32(surface+20), mid=MR32(surface+28);
+    if(ui_tex_trace_match(w,h,fmt)){
+        size_t probe=srcpitch;
+        if((uint64_t)src+probe>GUEST_END)probe=0;
+        ui_tex_trace_data("d3dx-source",surface,mid,probe?g_mem+src:NULL,probe,srcfmt);
+    }
     static unsigned d3dx_note;
     if (d3dx_note++ < 12u) fprintf(stderr,"[d3dx-copy] surf=%08x %ux%u fmt=%u mid=%u srcfmt=%u pitch=%u dstrect=%08x srcrect=%08x rect=%d,%d,%d,%d\n",
                                   surface,w,h,fmt,mid,srcfmt,srcpitch,dstrect,srcrect,
@@ -903,19 +951,45 @@ int com_d3dx_load_surface(uint32_t surface, uint32_t dstrect, uint32_t src,
     if (dxt){
         unsigned block_bytes=(srcfmt==0x31545844u)?8u:16u;
         if (fmt!=srcfmt || !w || !h) return 0x80070057u;
-        int dx=0,dy=0,dw=(int)w,dh=(int)h,sx=0,sy=0;
+        int dx=0,dy=0,dw=(int)w,dh=(int)h,sx=0,sy=0,sw=dw,sh=dh;
         if (dstrect){ dx=(int32_t)MR32(dstrect); dy=(int32_t)MR32(dstrect+4); dw=(int32_t)MR32(dstrect+8)-dx; dh=(int32_t)MR32(dstrect+12)-dy; }
-        if (srcrect){ sx=(int32_t)MR32(srcrect); sy=(int32_t)MR32(srcrect+4); int sw=(int32_t)MR32(srcrect+8)-sx, sh=(int32_t)MR32(srcrect+12)-sy;
-            if (!dstrect){ dw=sw; dh=sh; } else if (sw!=dw || sh!=dh) return 0x80070057u; }
-        if (dx<0 || dy<0 || sx<0 || sy<0 || dw<=0 || dh<=0 || dx+dw>(int)w || dy+dh>(int)h || (dx|dy|sx|sy)&3) return 0x80070057u;
+        if (srcrect){ sx=(int32_t)MR32(srcrect); sy=(int32_t)MR32(srcrect+4);
+            sw=(int32_t)MR32(srcrect+8)-sx; sh=(int32_t)MR32(srcrect+12)-sy; }
+        if (dx<0 || dy<0 || sx<0 || sy<0 || dw<=0 || dh<=0 || sw<=0 || sh<=0 ||
+            dx+dw>(int)w || dy+dh>(int)h || (dx|dy)&3) return 0x80070057u;
         uint32_t pitch=metal_level_pitch(w,0,fmt); if (!pitch) return 0x80070057u;
-        unsigned sblocks=((unsigned)dw+3u)/4u, rows=((unsigned)dh+3u)/4u;
-        unsigned rowbytes=sblocks*block_bytes, xoff=(unsigned)sx/4u*block_bytes;
-        uint64_t src_end=(uint64_t)src+(uint32_t)(sy/4+(int)rows-1)*srcpitch+xoff+rowbytes;
-        if (srcpitch < sblocks*block_bytes || src_end > GUEST_END) return 0x80070057u;
+        unsigned src_blocks=((unsigned)(sx+sw)+3u)/4u;
+        unsigned src_rows=((unsigned)(sy+sh)+3u)/4u;
+        uint64_t src_end=(uint64_t)src+(size_t)(src_rows-1u)*srcpitch+
+                         (size_t)src_blocks*block_bytes;
+        if (srcpitch < src_blocks*block_bytes || src_end > GUEST_END) return 0x80070057u;
         uint32_t buf=MR32(surface+32); if (!buf){ buf=gbuf_alloc(pitch*((h+3u)/4u)+64u); if (!buf) return 0x8007000eu; MR32(surface+32)=buf; }
-        for (unsigned y=0; y<rows; y++) memcpy(g_mem+buf+(uint32_t)(dy/4+(int)y)*pitch+(unsigned)dx/4u*block_bytes,
-                                                  g_mem+src+(uint32_t)(sy/4+(int)y)*srcpitch+xoff,rowbytes);
+        if(sw==dw && sh==dh && ((sx|sy)&3)==0){
+            unsigned rows=((unsigned)dh+3u)/4u;
+            unsigned rowbytes=((unsigned)dw+3u)/4u*block_bytes;
+            unsigned xoff=(unsigned)sx/4u*block_bytes;
+            for(unsigned y=0;y<rows;y++)
+                memcpy(g_mem+buf+(uint32_t)(dy/4+(int)y)*pitch+(unsigned)dx/4u*block_bytes,
+                       g_mem+src+(uint32_t)(sy/4+(int)y)*srcpitch+xoff,rowbytes);
+        }else if(srcfmt==0x33545844u){
+            /* Low texture quality asks D3DX to shrink 1024-wide DXT3 UI
+             * sheets into 512-wide textures.  Decode at destination texel
+             * centres and recompress each destination block. */
+            for(int by=0;by<dh;by+=4)for(int bx=0;bx<dw;bx+=4){
+                uint32_t px[16];
+                for(int y=0;y<4;y++)for(int x=0;x<4;x++){
+                    int tx=bx+x,ty=by+y;
+                    if(tx>=dw)tx=dw-1;if(ty>=dh)ty=dh-1;
+                    unsigned spx=(unsigned)sx+
+                        (unsigned)(((uint64_t)(2*tx+1)*(unsigned)sw)/(2u*(unsigned)dw));
+                    unsigned spy=(unsigned)sy+
+                        (unsigned)(((uint64_t)(2*ty+1)*(unsigned)sh)/(2u*(unsigned)dh));
+                    px[y*4+x]=d3dx_bc2_pixel(g_mem+src,srcpitch,spx,spy);
+                }
+                d3dx_bc2_block(g_mem+buf+(uint32_t)(dy+by)/4u*pitch+
+                               (uint32_t)(dx+bx)/4u*16u,px);
+            }
+        }else return 0x80070057u;
         if (mid && metal_available()) d3dx_upload_surface(surface,mid,g_mem+buf,pitch,w,h,fmt);
         return 0;
     }
@@ -4524,6 +4598,8 @@ int com_call(CPU *c, uint32_t magic){
                     size_t bytes=(size_t)pitch*rows;
                     if (!sb || !pitch || !rows || bytes > 0x7fffffffu ||
                         !mem_is_committed(sb) || (uint64_t)sb+bytes > GUEST_END) continue;
+                    if (lv==0u && ui_tex_trace_match(sw,sh,sf))
+                        ui_tex_trace_data("update-source",src,MR32(dst+28),g_mem+sb,bytes,pitch);
                     if (!db){ db=gbuf_alloc((uint32_t)bytes+64u); MR32(dst+32u+4u*lv)=db; }
                     if (!db || !mem_is_committed(db) || (uint64_t)db+bytes > GUEST_END) continue;
                     memcpy(g_mem+db,g_mem+sb,bytes);
@@ -4748,6 +4824,8 @@ int com_call(CPU *c, uint32_t magic){
                 fprintf(stderr,"  [tex] %ux%u lev=%u usage=0x%x fmt=%u(%s) pool=%u\n",
                         w,h,lev,usage,fmt,fn2,pool); } }
             if (ENVC("FO2_SHA_BIND_TRACE")){ static unsigned nprov; if(nprov++<256u) fprintf(stderr,"[tex-prov] create2d obj=%08x tid=%u %ux%u levels=%u fmt=%u usage=%x pool=%u caller=%08x\n",t,MR32(t+28),w,h,lev,fmt,usage,pool,c->eip); }
+            if (ui_tex_trace_match(w,h,fmt))
+                ui_tex_trace_data("create",t,MR32(t+28),NULL,0u,pool);
             if(pp) MR32(pp)=t; r=0; }
         else if (MID(CreateCubeTexture)){
             /* (this, EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture, pShared)
@@ -5088,6 +5166,9 @@ int com_call(CPU *c, uint32_t magic){
                                             : (self + 32u + 4u*level)) : 0;
             uint32_t buf = slot ? MR32(slot) : 0;
             if(!buf){ buf = gbuf_alloc(pitch*rows + 64u); if(slot) MR32(slot)=buf; }
+            if (level==0u && ui_tex_trace_match(w,h,fmt))
+                ui_tex_trace_data("lock-before",self,MR32(self+28),buf?g_mem+buf:NULL,
+                                  (size_t)pitch*rows,pitch);
             if (ENVC("FO2_SHA_BIND_TRACE")){ static unsigned nl; if(nl++<256u) fprintf(stderr,"[tex-prov] lockrect obj=%08x tid=%u cube=%d face=%u level=%u %ux%u fmt=%u pitch=%u rows=%u buf=%08x\n",self,MR32(self+28),is_cube,face,level,w,h,fmt,pitch,rows,buf); }
             /* a render target the game made lockable (CreateRenderTarget):
              * what the GPU drew there, the cover shoot's picture (gpu_web.c) */
@@ -5106,7 +5187,12 @@ int com_call(CPU *c, uint32_t magic){
             uint32_t w = self?MR32(self+4):0, h = self?MR32(self+8):0;
             uint32_t fmt = self?MR32(self+20):21u, mid = self?MR32(self+28):0;
             uint32_t buf = self ? (is_cube2 ? MR32(self + 104u + 4u*(face2 & 7u))
-                                            : MR32(self + 32u + 4u*level)) : 0;
+                                             : MR32(self + 32u + 4u*level)) : 0;
+            if (level==0u && ui_tex_trace_match(w,h,fmt))
+                ui_tex_trace_data("unlock",self,mid,buf?g_mem+buf:NULL,
+                                  (size_t)metal_level_pitch(w,level,fmt)*
+                                  metal_level_rows(h,level,fmt),
+                                  metal_level_pitch(w,level,fmt));
             if (ENVC("FO2_SHA_BIND_TRACE")){ static unsigned nu; if(nu++<512u) fprintf(stderr,"[tex-prov] unlock-upload obj=%08x tid=%u cube=%d face=%u level=%u %ux%u fmt=%u pitch=%u buf=%08x\n",self,mid,is_cube2,face2,level,w,h,fmt,metal_level_pitch(w,level,fmt),buf); }
             gheap_check_block(c, buf, "LOCK BUFFER OVERRUN (UnlockRect)");   /* NFSU2_HEAPCHECK only */
             if (metal_available() && mid && buf && w && h){
