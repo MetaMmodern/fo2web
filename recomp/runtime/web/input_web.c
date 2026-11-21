@@ -1007,13 +1007,13 @@ static void read_real(PadState *s){
     }
 }
 /* FlatOut's browser-only touch pad before mprace_owns_input() can mask the
- * shared controller snapshot.  This is intentionally narrower than
- * gamepad_read: only the touch-only pad is accepted, so a physical controller
- * remains owned by FlatOut's normal input path. */
+ * shared controller snapshot.  The page names it "Touch analog" only while
+ * thumbstick/tilt steering is active and visible.  Button mode deliberately
+ * does not match, leaving FlatOut's keyboard steering untouched. */
 int gamepad_touch_lx(float *out){
     PadState s;
     read_real(&s);
-    if (!out || !s.connected || strcmp(s.name, "Touch controls")) return 0;
+    if (!out || !s.connected || strcmp(s.name, "Touch analog")) return 0;
     float v = s.axis[PAD_AXIS_LX];
     if (!isfinite(v)) v = 0.f;
     *out = v < -1.f ? -1.f : (v > 1.f ? 1.f : v);

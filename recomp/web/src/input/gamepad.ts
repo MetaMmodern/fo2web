@@ -154,16 +154,18 @@ export interface PadPage {
   stick?(x: number, y: number): boolean;
 }
 
-/** the touch controls' share of the pad (web/src/app/touch.ts): PAD_* button bits and the left stick's x */
-export interface TouchPad { buttons: number; lx: number }
+/** the touch controls' share of the pad (web/src/app/touch.ts): PAD_* button bits, the left stick's x, and whether
+ *  proportional steering currently owns LX (false leaves FlatOut's keyboard steering untouched) */
+export interface TouchPad { buttons: number; lx: number; analog: boolean }
 
 /** a real controller's snapshot with the touch controls' added (their buttons too, the stick further out of the
  *  two); without a real one, the touch controls are the controller */
 function withTouch(s: PadSnapshot, t: TouchPad): PadSnapshot {
   const axes = [...s.axes];
   if (Math.abs(t.lx) > Math.abs(axes[PAD_AXIS_LX])) axes[PAD_AXIS_LX] = t.lx;
-  return s.connected ? { ...s, buttons: s.buttons | t.buttons, axes }
-    : { connected: true, buttons: t.buttons, axes, family: PADF_GENERIC, name: 'Touch controls', index: -2 };
+  const name = t.analog ? 'Touch analog' : 'Touch controls';
+  return s.connected ? { ...s, buttons: s.buttons | t.buttons, axes, name: t.analog ? name : s.name }
+    : { connected: true, buttons: t.buttons, axes, family: PADF_GENERIC, name, index: -2 };
 }
 
 /** a stick pressed in alone waits this long (ms) for the other, the menu's shortcut, before the game gets it (the horn,

@@ -420,7 +420,11 @@ export class TouchControls {
   }
 
   private sendPad() {
-    this.session?.input?.touchPad?.({ buttons: this.padButtons, lx: this.steering === 'buttons' ? 0 : this.lx });
+    this.session?.input?.touchPad?.({
+      buttons: this.padButtons,
+      lx: this.steering === 'buttons' ? 0 : this.lx,
+      analog: this.mode === 'drive' && this.steering !== 'buttons' && !this.away,
+    });
   }
 
   // ---- fingers on the controls --------------------------------------------------------------
