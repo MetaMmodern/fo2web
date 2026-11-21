@@ -92,6 +92,9 @@ void win32_keyboard_hook_message(CPU *c, uint32_t msg, uint32_t vk, uint32_t lp)
     static unsigned shown;
     if (shown++ < 16u)
         fprintf(stderr, "[fo2-input] keyboard hook msg=0x%04x vk=0x%02x flags=0x%08x\n", msg, vk, lp);
+#ifdef FLATOUT2
+    { void fo2_touch_key_event(uint32_t, uint32_t); fo2_touch_key_event(vk, lp); }
+#endif
     call_guest(c, g_keyboard_hook, 3, args);
 }
 

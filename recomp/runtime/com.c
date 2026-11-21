@@ -3015,6 +3015,135 @@ static void fxtr_dev(CPU *c, int iface, int mid, int nargs, const char *nm){
     fprintf(stderr, "\n");
 }
 
+#ifdef FLATOUT2
+/* FO2_TOUCH_PROBE=1 discovers FlatOut's actual state transitions at two
+ * boundaries owned by this port: DirectInput and Direct3D.  Unlike the old
+ * probe this does not guess that NFSU2 globals have the same meaning in
+ * FlatOut.
+ *
+ * Per-frame polling/drawing is reduced to a structural signature and emitted
+ * only when that signature changes (plus a sparse heartbeat).  One-shot input
+ * lifecycle calls are logged separately.  c->eip is the lifted return address:
+ * com_call popped it above, so it identifies the FlatOut caller rather than
+ * this COM bridge. */
+typedef struct {
+    uint32_t di_site[12];       /* caller, device kind and poll operation */
+    uint32_t draw_site[16];     /* lifted callers issuing draw calls */
+    uint16_t di_n, draw_n;
+    uint16_t scene_begin, scene_end;
+    uint32_t draws, indexed;
+    uint32_t primitives;
+} Fo2TouchFrame;
+
+static int fo2_touch_probe_on(void){
+    static int on = -1;
+    if (on < 0){
+        const char *e = ENVC("FO2_TOUCH_PROBE");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+static void fo2_touch_add(uint32_t *v, uint16_t *n, uint16_t cap, uint32_t x){
+    for (uint16_t i = 0; i < *n; i++) if (v[i] == x) return;
+    if (*n < cap) v[(*n)++] = x;
+}
+static unsigned fo2_touch_di_op(const char *nm){
+    if (!strcmp(nm, "GetDeviceState")) return 1u;
+    if (!strcmp(nm, "GetDeviceData"))  return 2u;
+    if (!strcmp(nm, "Poll"))           return 3u;
+    return 0u;
+}
+static int fo2_touch_same(const Fo2TouchFrame *a, const Fo2TouchFrame *b){
+    return a->di_n == b->di_n && a->draw_n == b->draw_n &&
+           a->scene_begin == b->scene_begin && a->scene_end == b->scene_end &&
+           !memcmp(a->di_site, b->di_site, (size_t)a->di_n * sizeof(uint32_t)) &&
+           !memcmp(a->draw_site, b->draw_site, (size_t)a->draw_n * sizeof(uint32_t));
+}
+static void fo2_touch_com(CPU *c, int iface, const char *nm){
+    static Fo2TouchFrame cur, last;
+    static int have_last;
+    static unsigned lines, event_lines;
+    static uint32_t last_event_caller, last_event_a1, last_event_a2;
+    static unsigned last_event_kind;
+    static char last_event_method[20];
+    int probe = fo2_touch_probe_on();
+
+    if (iface == IF_DIDEV){
+        if (!probe) return;
+        uint32_t self = A(c,0);
+        uint32_t kind = self && mem_is_committed(self + 11u) ? MR32(self + 8u) : 0u;
+        unsigned op = fo2_touch_di_op(nm);
+        if (op){
+            /* Guest text is below 0x01000000.  Packing the low 24 bits leaves
+             * room for device and operation while preserving the call site. */
+            uint32_t key = (c->eip & 0x00ffffffu) | ((kind & 15u) << 24) | ((op & 15u) << 28);
+            fo2_touch_add(cur.di_site, &cur.di_n, 12u, key);
+        } else if ((!strcmp(nm, "SetActionMap") || !strcmp(nm, "SetDataFormat") ||
+                    !strcmp(nm, "Acquire") || !strcmp(nm, "Unacquire")) &&
+                   event_lines < 80u){
+            if (last_event_caller == c->eip && last_event_kind == kind &&
+                last_event_a1 == A(c,1) && last_event_a2 == A(c,2) &&
+                !strcmp(last_event_method, nm))
+                return;
+            last_event_caller = c->eip; last_event_kind = kind;
+            last_event_a1 = A(c,1); last_event_a2 = A(c,2);
+            snprintf(last_event_method, sizeof last_event_method, "%s", nm);
+            event_lines++;
+            fprintf(stderr,
+                    "[fo2-touch-input] f=%u caller=%08x dev=%u method=%s a1=%08x a2=%08x\n",
+                    g_present_no, c->eip, kind, nm, A(c,1), A(c,2));
+        }
+    } else if (iface == IF_DEV){
+        if (!strcmp(nm, "BeginScene")) cur.scene_begin++;
+        else if (!strcmp(nm, "EndScene")) cur.scene_end++;
+        else if (!strcmp(nm, "DrawPrimitive") ||
+                 !strcmp(nm, "DrawIndexedPrimitive") ||
+                 !strcmp(nm, "DrawPrimitiveUP") ||
+                 !strcmp(nm, "DrawIndexedPrimitiveUP")){
+            cur.draws++;
+            if (nm[4] == 'I') cur.indexed++;
+            /* PrimitiveCount is argument 3 for DrawPrimitive, 6 for
+             * DrawIndexedPrimitive, 2 for Draw*UP.  It is context only and
+             * intentionally excluded from the change trigger. */
+            if (!strcmp(nm, "DrawPrimitive")) cur.primitives += A(c,3);
+            else if (!strcmp(nm, "DrawIndexedPrimitive")) cur.primitives += A(c,6);
+            else if (!strcmp(nm, "DrawIndexedPrimitiveUP")) cur.primitives += A(c,4);
+            else cur.primitives += A(c,2);
+            fo2_touch_add(cur.draw_site, &cur.draw_n, 16u, c->eip);
+        } else if (!strcmp(nm, "Present")){
+#ifdef __wasm__
+            { void fo2_touch_render_frame(uint32_t, const uint32_t *, unsigned);
+              fo2_touch_render_frame(cur.draws, cur.draw_site, cur.draw_n); }
+#endif
+            int changed = !have_last || !fo2_touch_same(&cur, &last);
+            int heartbeat = g_present_no && !(g_present_no % 600u);
+            if (probe && (changed || heartbeat) && lines < 160u){
+                lines++;
+                fprintf(stderr,
+                        "[fo2-touch] f=%u present=%08x scene=%u/%u draws=%u indexed=%u prim=%u di=",
+                        g_present_no, c->eip, cur.scene_begin, cur.scene_end,
+                        cur.draws, cur.indexed, cur.primitives);
+                if (!cur.di_n) fputc('-', stderr);
+                for (uint16_t i = 0; i < cur.di_n; i++){
+                    uint32_t x = cur.di_site[i];
+                    fprintf(stderr, "%s%u%c@%06x", i ? "," : "",
+                            (x >> 24) & 15u, "0SDP"[(x >> 28) & 15u],
+                            x & 0x00ffffffu);
+                }
+                fprintf(stderr, " drawsites=");
+                if (!cur.draw_n) fputc('-', stderr);
+                for (uint16_t i = 0; i < cur.draw_n; i++)
+                    fprintf(stderr, "%s%08x", i ? "," : "", cur.draw_site[i]);
+                fputc('\n', stderr);
+            }
+            last = cur;
+            have_last = 1;
+            memset(&cur, 0, sizeof cur);
+        }
+    }
+}
+#endif
+
 
 int com_call(CPU *c, uint32_t magic){
     uint32_t iface=(magic>>16)&0x1FFFu, m=magic&0xFFFFu;
@@ -3036,6 +3165,9 @@ int com_call(CPU *c, uint32_t magic){
         if (!mid) mid = g_midc[iface][m] = (int16_t)mid_resolve(nm);
     } else mid = mid_resolve(nm);
 
+#ifdef FLATOUT2
+    fo2_touch_com(c, (int)iface, nm);
+#endif
     if (g_dxrec_depth) dxrec_note(c, (int)iface, mid, nargs);
     if (g_fxtr && fxtr_now()) fxtr_dev(c, (int)iface, mid, nargs, nm);
     /* ZSEQ=<frame>: the order of target / Z surface / Clear / Z state in that frame (diagnostic) */

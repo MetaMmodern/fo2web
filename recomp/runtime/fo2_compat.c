@@ -7,9 +7,35 @@
 #include "cpu.h"
 #include "decls.h"
 #include "fo2_default_binds.h"
+#include "gamepad.h"
 
 uint32_t g_fe_mgr = 0;
 void overrides_report(void) {}
+
+/* FlatOut enumerates its own DirectInput devices before the page's touch pad
+ * exists, so the browser-only virtual pad is not in its controller list.
+ * sub_0046c8e0 is the confirmed local-player control callback and keeps the
+ * touch UI's race-state heartbeat tied to real player updates. */
+__attribute__((weak)) int gamepad_touch_lx(float *out){ (void)out; return 0; }
+__attribute__((weak)) void fo2_touch_player_frame(void){}
+void __real_sub_0046c8e0(CPU *c);
+void __wrap_sub_0046c8e0(CPU *c){
+    fo2_touch_player_frame();
+    __real_sub_0046c8e0(c);
+}
+
+/* sub_0046fa50 propagates the already-shaped player controls into the vehicle
+ * and then the simulation consumes them before sub_0046c8e0 returns.  Supply
+ * proportional touch LX at player+0x684 immediately before that propagation;
+ * writing vehicle+0x1df4 after the outer callback was too late. */
+void __real_sub_0046fa50(CPU *c);
+void __wrap_sub_0046fa50(CPU *c){
+    float steer;
+    uint32_t player = MR32(c->esp + 4u);
+    if (gamepad_touch_lx(&steer) && player && mem_is_committed(player + 0x687u))
+        MRF32(player + 0x684u) = steer;
+    __real_sub_0046fa50(c);
+}
 
 /* FlatOut's CRT memcpy has a valid indirect-call entry three bytes before the
  * function boundary discovered by the static lifter (0x005610b4).  Those

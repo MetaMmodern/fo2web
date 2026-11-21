@@ -1027,6 +1027,10 @@ void autotest_on_present(CPU *c){
         void gcpu_frame(void);
         int gcpu_status(char *, size_t);
         gcpu_frame();
+        /* FlatOut does not initialize the inherited NFS script engine, but its
+         * web status block still needs one update per Present.  status_web.c
+         * deliberately publishes drive=0 until its FlatOut probe is classified. */
+        { void status_web_frame(void); status_web_frame(); }
         frame++;
         if (frame == 1){
             start_t = report_t = now_ms(); report_frame = frame;

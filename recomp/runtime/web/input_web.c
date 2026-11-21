@@ -1006,6 +1006,19 @@ static void read_real(PadState *s){
                 s->connected ? family_name(s->family) : "-", s->connected && s->wheel ? ", a steering wheel" : "");
     }
 }
+/* FlatOut's browser-only touch pad before mprace_owns_input() can mask the
+ * shared controller snapshot.  This is intentionally narrower than
+ * gamepad_read: only the touch-only pad is accepted, so a physical controller
+ * remains owned by FlatOut's normal input path. */
+int gamepad_touch_lx(float *out){
+    PadState s;
+    read_real(&s);
+    if (!out || !s.connected || strcmp(s.name, "Touch controls")) return 0;
+    float v = s.axis[PAD_AXIS_LX];
+    if (!isfinite(v)) v = 0.f;
+    *out = v < -1.f ? -1.f : (v > 1.f ? 1.f : v);
+    return 1;
+}
 static void stick_dz(float *x, float *y, float dz){
     float r = sqrtf(*x * *x + *y * *y);
     if (r <= dz || r <= 0.f){ *x = *y = 0.f; return; }

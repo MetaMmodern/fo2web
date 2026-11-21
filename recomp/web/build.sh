@@ -131,6 +131,8 @@ rm -f "$OUT/nfsu2.wasm"
 # when the original found no key.
 $CC $TARGET $OPT $FEAT -o "$OUT/nfsu2.wasm" $OBJS \
   -Wl,--wrap=sub_0055aca0 \
+  -Wl,--wrap=sub_0046c8e0 \
+  -Wl,--wrap=sub_0046fa50 \
   -Wl,--wrap=sub_005ea310 \
   -Wl,--wrap=sub_005e9350 \
   -Wl,--wrap=sub_005e89b0 \

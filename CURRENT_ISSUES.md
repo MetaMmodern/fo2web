@@ -8,7 +8,8 @@
 - On low graphics settings, menu text is sometimes misaligned.
 - On low graphics settings, text looks jagged; compare it with the original game.
 - On low graphics settings, the audio popup text overflows its container; compare it with the original game.
-- Touchscreen driving controls are incomplete, and changing the steering type has no apparent effect; verify and fix the controls for FlatOut.
+- The touchscreen Nitrous button also pressed Gas; verify that it now activates nitrous independently.
+- Verify the compact touchscreen menu action cluster (Del above Back/OK) and the combined Start/Pause race icon.
 - The start page once failed to load after the language picker was removed; the cause is unclear, and the issue is believed to be fixed. Confirm before launch.
 - Online car selection occasionally showed rapid jumps between rotation angles, but this has not been reproducible recently; monitor for recurrence.
 - Intro video frame-rate drops are no longer observed; monitor for recurrence.
@@ -17,3 +18,9 @@
 - Widescreen support is postponed; the game intentionally uses its original 4:3 presentation for now. Previous experiments are recorded in `recomp/FLATOUT_WIDESCREEN.md`.
 - Online mode and replacing NFS branding/names and restyling the website UI are done.
 - The black square that intermittently appeared in the menu is no longer observed.
+
+## Deferred touch-control follow-ups
+
+- Define when the page switches between menu navigation controls and driving controls.
+- Confirm the new proportional FlatOut steering channel works for both thumbstick and tilt.
+- Define the on-screen controller action mapping so touch controls follow player-rebound game inputs rather than hard-coded keys.

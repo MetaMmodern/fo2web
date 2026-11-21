@@ -2,15 +2,14 @@
 //   steering  three ways, switched with the mode button (top right) or the Controls sheet's touch tab, and kept in
 //             this browser:
 //               buttons  ◀ ▶ press the arrow keys, so the game's own keyboard steering applies (the default)
-//               stick    a thumb stick where the left thumb lands: the controller's left stick
-//               tilt     the phone is the wheel, from its motion sensor: the controller's left stick
-//   pedals    Gas and Brake press the up and down arrows; Nitro and the handbrake are the controller's LB and RB
-//             (Alt, the nitrous key, would turn the other keys into Alt+key).  Nitro holds Gas too, so the thumb on
-//             Gas can go up to it, and a thumb slides between Gas, Brake and Nitro without letting go.  With tilt,
-//             Brake and the handbrake go under the left thumb.
+//               stick    a thumb stick where the left thumb lands: the controller's proportional left stick
+//               tilt     the phone is the wheel, from its motion sensor: the controller's proportional left stick
+//   pedals    Gas and Brake press the up and down arrows; Nitro presses FlatOut's Alt binding (and the virtual
+//             controller's LB); the handbrake presses Space and RB.  A thumb slides between Gas, Brake and Nitro without
+//             letting go.  With tilt, Brake and the handbrake go under the left thumb.
 //   gears     with a manual gearbox, gear down and up above the left thumb: the controller's X and A, as on a pad
 //             (Ctrl and Shift on the keyboard would be modifiers too)
-//   small     pause, camera, look back, reset; in free roam also the map, messages, horn, quick chat (quickchat.ts) and
+//   small     start/pause, camera, look back, reset; in free roam also the map, messages, horn, quick chat (quickchat.ts) and
 //             start an event
 //   horizon   while tilt steers, the game's 3D view turns against the phone's tilt from straight ahead, so the road's
 //             horizon stays level with the real one (the HUD stays on the phone; runtime/overrides.c sub_005c7ec0).
@@ -172,11 +171,13 @@ type Mode = 'drive' | 'menu' | '';
 
 const path = (d: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
 const ICONS = {
-  left: '<path class="fill" d="M16 5L7 12l9 7z"/>',
-  right: '<path class="fill" d="M8 5l9 7-9 7z"/>',
-  pause: '<path d="M9 6v12M15 6v12"/>',
-  camera: '<path d="M4 8h3l2-2h6l2 2h3v10H4z"/><circle cx="12" cy="13" r="3"/>',
-  look: '<path d="M19 12H6M11 7l-5 5 5 5"/>',
+  left: '<path class="fill" d="m16 5-9 7 9 7z"/>',
+  right: '<path class="fill" d="m8 5 9 7-9 7z"/>',
+  /* One control starts the race and pauses it afterwards. */
+  startPause: '<path class="fill" d="m5.5 6 7 6-7 6z"/><path d="M15.5 6v12M19 6v12"/>',
+  camera: '<path d="M3.5 8.5h4l1.7-2.3h5.6l1.7 2.3h4v10.8H3.5z"/><circle cx="12" cy="13.9" r="3.3"/><path d="M6.5 11h1"/>',
+  /* A rear-view mirror, rather than an ambiguous back arrow. */
+  look: '<path d="M4 9.5c2.6-2 13.4-2 16 0l-1.6 5.7c-2.7 1.1-10.1 1.1-12.8 0z"/><path d="M7.2 10.6c2.8-.8 6.8-.8 9.6 0"/><path d="M6.5 16.5 5 19M17.5 16.5 19 19"/>',
   reset: '<path d="M6 13a6 6 0 1 0 2-5.2"/><path d="M5 4v4h4"/>',
   map: '<path d="M4 6l5-2 6 2 5-2v14l-5 2-6-2-5 2z"/><path d="M9 4v14M15 6v14"/>',
   msgs: '<path d="M4 6h16v12H4z"/><path d="M4 7l8 6 8-6"/>',
@@ -186,8 +187,13 @@ const ICONS = {
   buttons: '<path d="M10 7l-5 5 5 5M14 7l5 5-5 5"/>',
   stick: '<circle cx="12" cy="12" r="8"/><circle class="fill" cx="12" cy="12" r="3"/>',
   tilt: '<rect x="4" y="8" width="16" height="9" rx="2" transform="rotate(-18 12 12)"/>',
-  down: '<path d="M6 9l6 6 6-6"/>',
-  up: '<path d="M6 15l6-6 6 6"/>',
+  brake: '<path d="M7.5 4.5h9l2.3 15H5.2z"/><path d="M8.4 9h7.2M7.7 13h8.6M7 17h10"/>',
+  gas: '<path d="m9 4.2 7.7 1.3-2.9 14.3-7.7-1.3z"/><path d="m10 8.6 5.2.9M9.2 12.7l5.2.9M8.4 16.8l5.2.9"/>',
+  /* Standard dashboard parking-brake/handbrake symbol. */
+  handbrake: '<circle cx="12" cy="12" r="6.5"/><path d="M8.8 17V7h3.7a3.2 3.2 0 0 1 0 6.4H8.8M4.5 7.2C3.5 8.5 3 10.2 3 12s.5 3.5 1.5 4.8M19.5 7.2c1 1.3 1.5 3 1.5 4.8s-.5 3.5-1.5 4.8"/>',
+  nitro: '<path d="M8.2 6.1h7.6l1.4 2.5v10.2l-2.2 1.6H9l-2.2-1.6V8.6z"/><path d="M10 6.1V3.8h4v2.3M7.3 9.5h9.4M10.1 12.2h3.8M10.1 15.2h3.8"/><path class="fill" d="m12 10.8-1.6 3h1.3l-.6 2.3 2.4-3.3h-1.3z"/>',
+  down: '<path class="fill" d="M5 8l7 9 7-9z"/>',
+  up: '<path class="fill" d="M5 16l7-9 7 9z"/>',
   menuUp: '<path class="fill" d="M5 16l7-9 7 9z"/>',
   menuDown: '<path class="fill" d="M5 8l7 9 7-9z"/>',
 };
@@ -261,7 +267,7 @@ export class TouchControls {
     this.knobEl = document.createElement('div'); this.knobEl.className = 'stick-knob';
     this.baseEl.append(this.knobEl); this.stickEl.append(this.baseEl);
     root.append(this.stickEl);
-    // inner: an icon (Nitro's is a picture, style.css); or text, the words on it ("\n": a second line)
+    // inner: an icon or text (the menu controls retain their translated labels).
     const add = (id: string, label: string, inner: string | { text: string }, c: Partial<Ctl>, cls = '') => {
       const el = document.createElement('div');
       el.className = `tc ${cls}`.trim(); el.dataset.ctl = id;
@@ -270,7 +276,7 @@ export class TouchControls {
       root.append(el);
       this.ctls.set(id, { id, el, label, text: typeof inner === 'string' ? undefined : inner.text, fingers: new Set(), downAt: 0, upTimer: 0, ...c });
     };
-    add('pause', N('Pause'), path(ICONS.pause), { keys: ['Escape'] }, 'small');
+    add('pause', N('Start / Pause'), path(ICONS.startPause), { keys: ['Escape'] }, 'small');
     add('camera', N('Camera'), path(ICONS.camera), { keys: ['KeyC'] }, 'small');
     add('look', N('Look back'), path(ICONS.look), { keys: ['KeyB'] }, 'small');
     add('reset', N('Reset'), path(ICONS.reset), { keys: ['KeyR'] }, 'small');
@@ -283,10 +289,11 @@ export class TouchControls {
     add('start', N('Start an event'), { text: N('Start') }, { keys: ['Enter'] }, 'pill roam');
     add('left', N('Steer left'), path(ICONS.left), { keys: ['ArrowLeft'], group: 'steer' }, 'big');
     add('right', N('Steer right'), path(ICONS.right), { keys: ['ArrowRight'], group: 'steer' }, 'big');
-    add('brake', N('Brake'), { text: N('Brake') }, { keys: ['ArrowDown'], group: 'pedal' }, 'big');
-    add('gas', N('Gas'), { text: N('Gas') }, { keys: ['ArrowUp'], group: 'pedal' }, 'big');
-    add('nitro', N('Nitrous'), '<i class="nitro" aria-hidden="true"></i>', { keys: ['ArrowUp'], bit: 1 << PAD_LB, group: 'pedal' }, 'round');
-    add('hb', N('Handbrake'), { text: N('Hand\nbrake') }, { bit: 1 << PAD_RB }, 'round');
+    add('brake', N('Brake'), path(ICONS.brake), { keys: ['ArrowDown'], group: 'pedal' }, 'big');
+    add('gas', N('Gas'), path(ICONS.gas), { keys: ['ArrowUp'], group: 'pedal' }, 'big');
+    add('nitro', N('Nitrous'), path(ICONS.nitro), { keys: ['AltLeft'], bit: 1 << PAD_LB, group: 'pedal' }, 'round');
+    add('nitro-left', N('Nitrous'), path(ICONS.nitro), { keys: ['AltLeft'], bit: 1 << PAD_LB }, 'round left-nitro');
+    add('hb', N('Handbrake'), path(ICONS.handbrake), { keys: ['Space'], bit: 1 << PAD_RB }, 'round');
     add('down', N('Gear down'), path(ICONS.down), { bit: 1 << PAD_X }, 'gear');
     add('up', N('Gear up'), path(ICONS.up), { bit: 1 << PAD_A }, 'gear');
     // the menus'
@@ -294,8 +301,9 @@ export class TouchControls {
     add('m-left', N('Left'), path(ICONS.left), { keys: ['ArrowLeft'] }, 'menu dpad');
     add('m-right', N('Right'), path(ICONS.right), { keys: ['ArrowRight'] }, 'menu dpad');
     add('m-down', N('Down'), path(ICONS.menuDown), { keys: ['ArrowDown'] }, 'menu dpad');
-    add('m-back', N('Back'), { text: N('Back') }, { keys: ['Escape'] }, 'menu wide');
-    add('m-ok', N('OK'), { text: N('OK') }, { keys: ['Enter'] }, 'menu wide');
+    add('m-del', N('Delete'), { text: N('Del') }, { keys: ['Delete'] }, 'menu action');
+    add('m-back', N('Back'), { text: N('Back') }, { keys: ['Escape'] }, 'menu action');
+    add('m-ok', N('OK'), { text: N('OK') }, { keys: ['Enter'] }, 'menu action');
     this.relabel();
     onSteering(() => this.applySteering(steering()));
     stage.append(root);
@@ -433,7 +441,8 @@ export class TouchControls {
     if (!c?.group) return;
     const to = this.ctlAt(e.clientX, e.clientY);
     if (!to || to === c || to.group !== c.group) return;
-    // the next one first: a key both hold (Gas's, Nitro's) stays down
+    // Press the next one before releasing the previous one so sliding between
+    // pedals does not leave a frame with neither action held.
     this.byFinger.set(e.pointerId, to);
     this.press(to, e.pointerId);
     this.release(c, e.pointerId);

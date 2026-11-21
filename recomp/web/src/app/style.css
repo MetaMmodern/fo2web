@@ -438,9 +438,8 @@ html:has(> body > .stage:not([hidden])) { overflow: hidden; }
 }
 @media (prefers-reduced-motion: reduce) { .data-bars i { animation: none; opacity: .75; } }
 html[data-touch] .data-loading { top: calc(max(16px, env(safe-area-inset-top)) + 60px * var(--ts)); }
-/* touch controls (touch.ts) while the player drives: dim and see-through like the menu's button, lime while
- * pressed.  The small round ones in a row after the menu's button (the mode button and tilt's straight-ahead top
- * right), the left thumb's bottom left, the right thumb's bottom right; free roam adds a row's end and Start. */
+/* Touch controls: a compact split-thumb driving layout.  The left rail holds steering and look-back; the right
+ * rail has the pedals and secondary driving actions, leaving the road's centre unobscured. */
 .touch {
   position: absolute; inset: 0; z-index: 3; pointer-events: none; -webkit-user-select: none; user-select: none;
   --l: max(12px, env(safe-area-inset-left)); --r: max(12px, env(safe-area-inset-right));
@@ -451,75 +450,84 @@ html[data-touch] .data-loading { top: calc(max(16px, env(safe-area-inset-top)) +
 .touch > * { position: absolute; pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent; }
 .tc {
   display: flex; align-items: center; justify-content: center; text-align: center;
-  background: rgba(0, 0, 0, 0.4); color: rgba(255, 255, 255, 0.72); font: italic 700 calc(16px * var(--ts)) / calc(20px * var(--ts)) var(--font);
+  border: 1px solid rgba(255, 255, 255, 0.52); border-radius: calc(12px * var(--ts));
+  background: linear-gradient(145deg, rgba(45, 45, 42, 0.66), rgba(7, 7, 6, 0.42));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 3px 12px rgba(0, 0, 0, 0.32);
+  color: rgba(255, 255, 255, 0.92); font: italic 700 calc(16px * var(--ts)) / calc(20px * var(--ts)) var(--font);
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
-.tc svg { width: calc(24px * var(--ts)); height: calc(24px * var(--ts)); fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tc svg { width: calc(24px * var(--ts)); height: calc(24px * var(--ts)); fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .tc svg .fill { fill: currentColor; stroke: none; }
-.tc.on { background: rgba(0, 0, 0, 0.72); color: var(--lime); }
+.tc.on { border-color: #fff0ae; background: rgba(213, 170, 39, 0.8); color: #17140c; transform: scale(.95); }
 .tc.small { top: var(--t); width: calc(48px * var(--ts)); height: calc(48px * var(--ts)); border-radius: 50%; }
-.tc.big { bottom: var(--b); border-radius: calc(16px * var(--ts)); }
-.tc.big svg { width: calc(32px * var(--ts)); height: calc(32px * var(--ts)); }
-.tc.round { border-radius: 50%; font-size: calc(14px * var(--ts)); line-height: calc(16px * var(--ts)); }
-/* Nitro: the nitrous bottle of the game's performance shop (Upscaled HUD's copy, white), a mask in the control's colour */
-.tc .nitro { width: calc(48px * var(--ts)); height: calc(17px * var(--ts)); background: currentColor; mask: url(./nitro.png) center / contain no-repeat; }
+.tc.big { bottom: var(--b); border-radius: calc(10px * var(--ts)); }
+.tc.big svg { width: calc(36px * var(--ts)); height: calc(36px * var(--ts)); stroke-width: 2.2; }
+.tc.round { border-radius: 50%; }
+.tc.round svg { width: calc(29px * var(--ts)); height: calc(29px * var(--ts)); stroke-width: 2; }
 .tc.pill { height: calc(40px * var(--ts)); padding: 0 calc(20px * var(--ts)); border-radius: calc(20px * var(--ts)); }
-.tc[data-ctl="pause"] { left: calc(var(--l) + 56px * var(--ts)); }
-.tc[data-ctl="camera"] { left: calc(var(--l) + 112px * var(--ts)); }
-.tc[data-ctl="look"] { left: calc(var(--l) + 168px * var(--ts)); }
-.tc[data-ctl="reset"] { left: calc(var(--l) + 224px * var(--ts)); }
+.tc[data-ctl="pause"] { left: var(--l); top: calc(var(--t) + 56px * var(--ts)); }
+.tc[data-ctl="camera"] { right: var(--r); left: auto; }
+.tc[data-ctl="look"] { left: var(--l); top: auto; bottom: calc(var(--b) + 176px * var(--ts)); }
+.tc[data-ctl="reset"] { left: calc(var(--l) + 56px * var(--ts)); }
 .tc[data-ctl="map"] { left: calc(var(--l) + 280px * var(--ts)); }
 .tc[data-ctl="msgs"] { left: calc(var(--l) + 336px * var(--ts)); }
 .tc[data-ctl="horn"] { left: calc(var(--l) + 392px * var(--ts)); }
 .tc[data-ctl="chat"] { left: calc(var(--l) + 448px * var(--ts)); }
-.tc[data-ctl="mode"] { right: var(--r); }
-.tc[data-ctl="center"] { right: calc(var(--r) + 56px * var(--ts)); }
+.tc[data-ctl="mode"] { right: calc(var(--r) + 56px * var(--ts)); }
+.tc[data-ctl="center"] { right: calc(var(--r) + 112px * var(--ts)); }
 .tc[data-ctl="start"] { left: var(--l); bottom: calc(var(--b) + 128px * var(--ts)); }
-.tc[data-ctl="left"] { left: var(--l); width: calc(80px * var(--ts)); height: calc(80px * var(--ts)); }
-.tc[data-ctl="right"] { left: calc(var(--l) + 88px * var(--ts)); width: calc(80px * var(--ts)); height: calc(80px * var(--ts)); }
-.tc[data-ctl="gas"] { right: var(--r); width: calc(84px * var(--ts)); height: calc(148px * var(--ts)); }
-.tc[data-ctl="brake"] { right: calc(var(--r) + 92px * var(--ts)); width: calc(84px * var(--ts)); height: calc(104px * var(--ts)); }
-.tc[data-ctl="nitro"] { right: calc(var(--r) + 12px * var(--ts)); bottom: calc(var(--b) + 160px * var(--ts)); width: calc(60px * var(--ts)); height: calc(60px * var(--ts)); }
+.tc[data-ctl="left"] { left: var(--l); width: calc(72px * var(--ts)); height: calc(72px * var(--ts)); }
+.tc[data-ctl="right"] { left: calc(var(--l) + 84px * var(--ts)); width: calc(72px * var(--ts)); height: calc(72px * var(--ts)); }
+.tc[data-ctl="gas"] { right: var(--r); width: calc(72px * var(--ts)); height: calc(140px * var(--ts)); }
+.tc[data-ctl="brake"] { right: calc(var(--r) + 84px * var(--ts)); width: calc(72px * var(--ts)); height: calc(102px * var(--ts)); }
+.tc[data-ctl="nitro"] { right: calc(var(--r) + 6px * var(--ts)); bottom: calc(var(--b) + 152px * var(--ts)); width: calc(64px * var(--ts)); height: calc(64px * var(--ts)); color: #ffe082; }
+.tc[data-ctl="nitro-left"] {
+  left: calc(var(--l) + 104px * var(--ts)); bottom: calc(var(--b) + 112px * var(--ts));
+  width: calc(64px * var(--ts)); height: calc(64px * var(--ts)); color: #ffe082;
+}
 .tc[data-ctl="hb"] {
-  right: calc(var(--r) + 106px * var(--ts)); bottom: calc(var(--b) + 116px * var(--ts)); width: calc(56px * var(--ts)); height: calc(56px * var(--ts));
-  font-size: calc(12px * var(--ts)); line-height: calc(14px * var(--ts));
+  right: calc(var(--r) + 88px * var(--ts)); bottom: calc(var(--b) + 114px * var(--ts)); width: calc(60px * var(--ts)); height: calc(60px * var(--ts));
 }
 /* a manual gearbox: gear down and up above the left thumb's controls (the arrows, the stick's corner, or tilt's
  * Brake and handbrake), and free roam's Start above them */
-.touch { --gb: calc(88px * var(--ts)); }
+.touch { --gb: calc(84px * var(--ts)); }
 .touch[data-steering="stick"] { --gb: calc(132px * var(--ts)); }
 .touch[data-steering="tilt"] { --gb: calc(112px * var(--ts)); }
-.tc.gear { bottom: calc(var(--b) + var(--gb)); width: calc(80px * var(--ts)); height: calc(56px * var(--ts)); border-radius: calc(16px * var(--ts)); }
+.tc.gear { bottom: calc(var(--b) + var(--gb)); width: calc(72px * var(--ts)); height: calc(56px * var(--ts)); border-radius: calc(10px * var(--ts)); }
 .tc.gear svg { width: calc(32px * var(--ts)); height: calc(32px * var(--ts)); stroke-width: 2.5; }
 .tc[data-ctl="down"] { left: var(--l); }
-.tc[data-ctl="up"] { left: calc(var(--l) + 88px * var(--ts)); }
+.tc[data-ctl="up"] { left: calc(var(--l) + 84px * var(--ts)); }
 .touch[data-gears] .tc[data-ctl="start"] { bottom: calc(var(--b) + var(--gb) + 72px * var(--ts)); }
 .touch:not([data-gears]) .gear { display: none; }
 /* tilt: Brake and the handbrake under the left thumb, Nitro beside Gas */
 .touch[data-steering="tilt"] .tc[data-ctl="brake"] { right: auto; left: var(--l); }
-.touch[data-steering="tilt"] .tc[data-ctl="hb"] { right: auto; left: calc(var(--l) + 96px * var(--ts)); bottom: calc(var(--b) + 24px * var(--ts)); }
-.touch[data-steering="tilt"] .tc[data-ctl="nitro"] { right: calc(var(--r) + 96px * var(--ts)); bottom: calc(var(--b) + 24px * var(--ts)); }
+.touch[data-steering="tilt"] .tc[data-ctl="hb"] { right: auto; left: calc(var(--l) + 84px * var(--ts)); bottom: calc(var(--b) + 20px * var(--ts)); }
+.touch[data-steering="tilt"] .tc[data-ctl="nitro"] { right: calc(var(--r) + 82px * var(--ts)); bottom: calc(var(--b) + 20px * var(--ts)); }
 .touch:not([data-steering="buttons"]) :is([data-ctl="left"], [data-ctl="right"]),
 .touch:not([data-steering="stick"]) .stick,
+.touch[data-steering="tilt"] .left-nitro,
 .touch:not([data-steering="tilt"]) [data-ctl="center"],
 .touch:not([data-roam]) .roam { display: none; }
-/* the menus': the arrows as a D-pad bottom left, Back over OK bottom right, in the bars beside the game's 4:3 menus
- * (--bar wide): the keys as big as the bar leaves room for, 44 to 52 px.  A faint rim: the bars are black behind the
- * movies and the profile screens */
+/* the menus': the arrows as a D-pad bottom left; Del above a compact Back/OK row bottom right, in the bars beside the
+ * game's 4:3 menus (--bar wide).  Every key remains at least 44 px.  A faint rim: the bars are black behind the movies
+ * and the profile screens. */
 .touch[data-mode="menu"] > :not(.menu), .touch:not([data-mode="menu"]) > .menu { display: none; }
 .tc.menu { box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.2); }
 .touch {
   --bar: calc((100vw - 100dvh * 4 / 3) / 2);
   --k: clamp(44px * var(--ts), calc((var(--bar) - var(--l) - 16px * var(--ts)) / 3), 52px * var(--ts));
-  --w: clamp(96px * var(--ts), calc(var(--bar) - var(--r) - 8px * var(--ts)), 136px * var(--ts));
+  --ma: clamp(44px * var(--ts), calc((var(--bar) - var(--r) - 14px * var(--ts)) / 2), 64px * var(--ts));
+  --mag: calc(6px * var(--ts));
 }
 .tc.dpad { width: var(--k); height: var(--k); border-radius: calc(12px * var(--ts)); }
 .tc[data-ctl="m-up"] { left: calc(var(--l) + var(--k) + 4px * var(--ts)); bottom: calc(var(--b) + 2 * (var(--k) + 4px * var(--ts))); }
 .tc[data-ctl="m-left"] { left: var(--l); bottom: calc(var(--b) + var(--k) + 4px * var(--ts)); }
 .tc[data-ctl="m-right"] { left: calc(var(--l) + 2 * (var(--k) + 4px * var(--ts))); bottom: calc(var(--b) + var(--k) + 4px * var(--ts)); }
 .tc[data-ctl="m-down"] { left: calc(var(--l) + var(--k) + 4px * var(--ts)); bottom: var(--b); }
-.tc.wide { right: var(--r); width: var(--w); height: var(--k); border-radius: 999px; }
-.tc[data-ctl="m-back"] { bottom: calc(var(--b) + var(--k) + 12px * var(--ts)); }
-.tc[data-ctl="m-ok"] { bottom: var(--b); }
+.tc.action { width: var(--ma); height: var(--k); border-radius: calc(12px * var(--ts)); font-size: calc(14px * var(--ts)); }
+.tc[data-ctl="m-del"] { right: var(--r); bottom: calc(var(--b) + var(--k) + var(--mag)); }
+.tc[data-ctl="m-back"] { right: calc(var(--r) + var(--ma) + var(--mag)); bottom: var(--b); }
+.tc[data-ctl="m-ok"] { right: var(--r); bottom: var(--b); }
 /* the thumb stick: anywhere in the lower left; at rest it waits in the corner, a touch brings it under the thumb */
 .stick { left: 0; bottom: 0; width: 42%; height: 72%; }
 .stick-base {
@@ -550,7 +558,7 @@ html[data-touch] .data-loading { top: calc(max(16px, env(safe-area-inset-top)) +
   html[data-touch] .touch { --t: calc(var(--pic-h) + 12px); }
   html[data-touch] .stage:has(> .touch[data-mode="drive"]) :is(.toasts, .hud-fps) { top: max(16px, env(safe-area-inset-top)); }
   html[data-touch] .toast.away { top: calc(var(--pic-h) / 2); }
-  html[data-touch] .touch { --k: calc(56px * var(--ts)); --w: calc(136px * var(--ts)); }
+  html[data-touch] .touch { --k: calc(56px * var(--ts)); --ma: calc(64px * var(--ts)); }
   html[data-touch] .tc[data-ctl="map"] { left: var(--l); top: calc(var(--t) + 56px * var(--ts)); }
   html[data-touch] .tc[data-ctl="msgs"] { left: calc(var(--l) + 56px * var(--ts)); top: calc(var(--t) + 56px * var(--ts)); }
   html[data-touch] .tc[data-ctl="horn"] { left: calc(var(--l) + 112px * var(--ts)); top: calc(var(--t) + 56px * var(--ts)); }
