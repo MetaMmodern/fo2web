@@ -183,7 +183,7 @@ fi
 if "$RESTART"; then
   echo "Verifying public WASM"
   HEADERS="$(curl -fsSI -H 'Accept-Encoding: identity' "$PUBLIC_URL/game.wasm")"
-  HTTP_STATUS="$(printf '%s\n' "$HEADERS" | awk 'toupper($1) ~ /^HTTP\\// {status=$2} END {print status}')"
+  HTTP_STATUS="$(printf '%s\n' "$HEADERS" | awk 'toupper($1) ~ /^HTTP\// {status=$2} END {print status}')"
   PUBLIC_SIZE="$(printf '%s\n' "$HEADERS" | awk 'tolower($1) == "content-length:" {gsub("\r", "", $2); size=$2} END {print size}')"
   [[ "$HTTP_STATUS" == "200" ]] || {
     echo "Public WASM returned HTTP $HTTP_STATUS" >&2
