@@ -4,7 +4,6 @@
 - Multiplayer search, joining, hosting, and racing have been verified for browser guests, remote players joining a browser host, and same-LAN players joining a browser host. However, players occasionally see “no players left” just before a race starts; investigate this intermittent failure.
 - Compared with the original at the same settings, the overall image looks somewhat bleached, as if some shaders or overall glow and sunbeams are missing. Investigate shader/effect coverage against the original.
 - Low graphics settings previously produced incorrect visuals; thoroughly test and fix every visual quality level.
-- On low and medium graphics settings, the sky is missing; low was reproduced on two tracks, while very low graphics displays the sky correctly.
 - On low graphics settings, menu text is sometimes misaligned.
 - On low graphics settings, text looks jagged; compare it with the original game.
 - On low graphics settings, the audio popup text overflows its container; compare it with the original game.

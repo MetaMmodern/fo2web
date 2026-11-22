@@ -910,6 +910,24 @@ static void d3dx_bc1_block(uint8_t *out,const uint32_t px[16]){
     }
     out[4]=(uint8_t)bits;out[5]=(uint8_t)(bits>>8);out[6]=(uint8_t)(bits>>16);out[7]=(uint8_t)(bits>>24);
 }
+static uint32_t d3dx_bc1_pixel(const uint8_t *src,unsigned pitch,unsigned x,unsigned y){
+    const uint8_t *b=src+(size_t)(y>>2)*pitch+(size_t)(x>>2)*8u;
+    unsigned pi=((y&3u)<<2)|(x&3u);
+    uint16_t c0=(uint16_t)(b[0]|((unsigned)b[1]<<8));
+    uint16_t c1=(uint16_t)(b[2]|((unsigned)b[3]<<8));
+    unsigned r[4],g[4],bl[4];
+    r[0]=((c0>>11)&31u)*255u/31u; g[0]=((c0>>5)&63u)*255u/63u; bl[0]=(c0&31u)*255u/31u;
+    r[1]=((c1>>11)&31u)*255u/31u; g[1]=((c1>>5)&63u)*255u/63u; bl[1]=(c1&31u)*255u/31u;
+    unsigned ci=(b[4+(pi>>2)]>>((pi&3u)*2u))&3u;
+    if(c0>c1){
+        r[2]=(2u*r[0]+r[1])/3u; g[2]=(2u*g[0]+g[1])/3u; bl[2]=(2u*bl[0]+bl[1])/3u;
+        r[3]=(r[0]+2u*r[1])/3u; g[3]=(g[0]+2u*g[1])/3u; bl[3]=(bl[0]+2u*bl[1])/3u;
+    }else{
+        r[2]=(r[0]+r[1])/2u; g[2]=(g[0]+g[1])/2u; bl[2]=(bl[0]+bl[1])/2u;
+        r[3]=g[3]=bl[3]=0u;
+    }
+    return ((c0<=c1 && ci==3u)?0u:0xff000000u)|(r[ci]<<16)|(g[ci]<<8)|bl[ci];
+}
 static void d3dx_bc2_block(uint8_t *out,const uint32_t px[16]){
     uint64_t alpha=0;
     for(int i=0;i<16;i++){
@@ -971,10 +989,10 @@ int com_d3dx_load_surface(uint32_t surface, uint32_t dstrect, uint32_t src,
             for(unsigned y=0;y<rows;y++)
                 memcpy(g_mem+buf+(uint32_t)(dy/4+(int)y)*pitch+(unsigned)dx/4u*block_bytes,
                        g_mem+src+(uint32_t)(sy/4+(int)y)*srcpitch+xoff,rowbytes);
-        }else if(srcfmt==0x33545844u){
-            /* Low texture quality asks D3DX to shrink 1024-wide DXT3 UI
-             * sheets into 512-wide textures.  Decode at destination texel
-             * centres and recompress each destination block. */
+        }else if(srcfmt==0x31545844u || srcfmt==0x33545844u){
+            /* Lower detail settings ask D3DX to resize DXT1 scene textures
+             * and DXT3 UI sheets.  Decode at destination texel centres and
+             * recompress each destination block. */
             for(int by=0;by<dh;by+=4)for(int bx=0;bx<dw;bx+=4){
                 uint32_t px[16];
                 for(int y=0;y<4;y++)for(int x=0;x<4;x++){
@@ -984,10 +1002,16 @@ int com_d3dx_load_surface(uint32_t surface, uint32_t dstrect, uint32_t src,
                         (unsigned)(((uint64_t)(2*tx+1)*(unsigned)sw)/(2u*(unsigned)dw));
                     unsigned spy=(unsigned)sy+
                         (unsigned)(((uint64_t)(2*ty+1)*(unsigned)sh)/(2u*(unsigned)dh));
-                    px[y*4+x]=d3dx_bc2_pixel(g_mem+src,srcpitch,spx,spy);
+                    px[y*4+x]=srcfmt==0x31545844u
+                        ?d3dx_bc1_pixel(g_mem+src,srcpitch,spx,spy)
+                        :d3dx_bc2_pixel(g_mem+src,srcpitch,spx,spy);
                 }
-                d3dx_bc2_block(g_mem+buf+(uint32_t)(dy+by)/4u*pitch+
-                               (uint32_t)(dx+bx)/4u*16u,px);
+                if(srcfmt==0x31545844u)
+                    d3dx_bc1_block(g_mem+buf+(uint32_t)(dy+by)/4u*pitch+
+                                   (uint32_t)(dx+bx)/4u*8u,px);
+                else
+                    d3dx_bc2_block(g_mem+buf+(uint32_t)(dy+by)/4u*pitch+
+                                   (uint32_t)(dx+bx)/4u*16u,px);
             }
         }else return 0x80070057u;
         if (mid && metal_available()) d3dx_upload_surface(surface,mid,g_mem+buf,pitch,w,h,fmt);
