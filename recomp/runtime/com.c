@@ -12,6 +12,8 @@ void guest_fair_yield(void);
 #include "d3d9_tables.h"
 #include "flatout_sha.h"
 #include "effect_smp_scope.h"
+#include "posproj_stream.h"
+#include "texture_mips.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -39,7 +41,7 @@ static int g_glow = -1;
 static int glow_on(void){ if(g_glow<0){ const char *e=ENVC("FO2GLOW");
     g_glow = (e && *e && e[0]!='0'); } return g_glow; }
 static int glow_take(unsigned *n, unsigned cap){ return (*n)++ < cap; }
-static unsigned g_glow_rs_n, g_glow_up_n, g_glow_d256_n, g_glow_fx_n;
+static unsigned g_glow_rs_n, g_glow_up_n, g_glow_d256_n, g_glow_fx_n, g_glow_post_state_n;
 static unsigned g_glow_dipskip_n, g_glow_es_n, g_glow_dip24_n, g_glow_setrt_n;
 /* Metal bridge (metal.m) - inert when absent */
 int  metal_available(void);
@@ -885,10 +887,15 @@ static void d3dx_upload_surface(uint32_t surface, uint32_t mid, const void *data
         ui_tex_trace_data("d3dx-upload",surface,mid,data,
                           (size_t)pitch*metal_level_rows(h,0,fmt),pitch);
     uint32_t face_tag=MR32(surface+44u);
+    uint32_t level=0u;
+    if ((CH_FLAGS(surface) & CF_CHILD) && CH_PARENT(surface)){
+        level=MR32(surface+48u);
+        w=MR32(CH_PARENT(surface)+4u); h=MR32(CH_PARENT(surface)+8u);
+    }
     if(face_tag>=1u && face_tag<=6u)
-        metal_upload_texture_face(mid,0u,face_tag-1u,data,pitch,w,h,fmt);
+        metal_upload_texture_face(mid,level,face_tag-1u,data,pitch,w,h,fmt);
     else
-        metal_upload_texture(mid,0u,data,pitch,w,h,fmt);
+        metal_upload_texture(mid,level,data,pitch,w,h,fmt);
 }
 static uint16_t d3dx_565(unsigned r,unsigned g,unsigned b){ return (uint16_t)(((r*31u+127u)/255u)<<11 | ((g*63u+127u)/255u)<<5 | ((b*31u+127u)/255u)); }
 static void d3dx_bc1_block(uint8_t *out,const uint32_t px[16]){
@@ -1107,12 +1114,13 @@ static void bind_set(uint32_t *slot, uint32_t o){
     *slot = o;
     if (old) com_release(old);
 }
-/* Surface (face, level) of texture t.  One cached child per slot at
- * +64..+103 (2D: level; cube: face + 6*level); it shares the texture's
+/* Surface (face, level) of texture t.  Cached 2D child slots are described in
+ * texture_mips.h (cube: +64..+103, face + 6*level); it shares the texture's
  * count.  GetSurfaceLevel used to create a new object on every call. */
 static uint32_t tex_child(uint32_t t, uint32_t face, uint32_t level, int cube){
     uint32_t k = cube ? face + 6u * level : level;
-    uint32_t slot = (k < 10u) ? t + 64u + 4u * k : 0u;
+    uint32_t slot = cube ? ((k < 10u) ? t + 64u + 4u * k : 0u)
+                         : ((k < TEX_MIP_SLOTS) ? t + tex_mip_child_offset(k) : 0u);
     uint32_t sf = slot ? MR32(slot) : 0u;
     if (sf && com_valid(sf) && CH_PARENT(sf) == t) return sf;
     sf = com_new(IF_SURF, 64);
@@ -1194,11 +1202,15 @@ static void com_destroy(uint32_t o){
     case IF_TEX: {
         uint32_t tid = MR32(o + 28u);
         if (tid && metal_available()) metal_free_texture(tid);
-        for (uint32_t k = 0; k < 8u; k++){ gbuf_free(MR32(o + 32u + 4u*k)); MR32(o + 32u + 4u*k) = 0; }
+        int cube = (CH_FLAGS(o) & CF_CUBE) != 0;
+        for (uint32_t k = 0; k < (cube ? 8u : TEX_MIP_SLOTS); k++){
+            uint32_t slot=o+tex_mip_lock_offset(k);
+            gbuf_free(MR32(slot)); MR32(slot)=0;
+        }
         if (CH_FLAGS(o) & CF_CUBE)
             for (uint32_t k = 0; k < 8u; k++){ gbuf_free(MR32(o + 104u + 4u*k)); MR32(o + 104u + 4u*k) = 0; }
-        for (uint32_t k = 0; k < 10u; k++){
-            uint32_t sf = MR32(o + 64u + 4u*k);
+        for (uint32_t k = 0; k < (cube ? 10u : TEX_MIP_SLOTS); k++){
+            uint32_t sf = MR32(o + tex_mip_child_offset(k));
             if (sf && com_valid(sf) && CH_PARENT(sf) == o){ gbuf_free(MR32(sf + 32u)); com_drop(sf); }
         }
         break; }
@@ -2041,6 +2053,12 @@ static void draw_posproj(uint32_t vp, uint32_t nv, uint32_t pt, uint32_t stride,
         width=g_req_w; height=g_req_h;
     }
     if (!width || !height) return;
+    if (glow_on() && g_posproj_pass_uvs==4u && uvs==1u){
+        static unsigned n;
+        if (glow_take(&n,8u))
+            fprintf(stderr,"[glow] post-stream rt=%u ps=%d stride=%u uvs=%u vertices=%u path=pretransformed\n",
+                    g_cur_rt,g_cur_ps_id,stride,uvs,nv);
+    }
     TVert tv[24] = {0};
     if (nv > 24u) return;
     for (unsigned i=0; i<nv; i++){
@@ -3389,6 +3407,19 @@ int com_call(CPU *c, uint32_t magic){
                 }
                 g_rs_dirty=1; if (metal_available()) { rs_apply(); g_rs_dirty=0; }
             } }
+            /* Capture the colour-space state at effect boundaries.  FlatOut's
+             * post passes are the only plausible users of SRGB texture/write
+             * state, which is not represented by the WebGPU sampler key yet.
+             * This is deliberately bounded and only enabled alongside the
+             * existing FO2GLOW investigation switch. */
+            if (glow_on() && fmt && (!strcmp(fmt,"PosprojTex1") || !strcmp(fmt,"PosprojTex4")) &&
+                glow_take(&g_glow_post_state_n, 64u))
+                fprintf(stderr, "[glow] post-state fx=%08x pass=%u srgb-write=%u srgb-tex=%u/%u/%u/%u c3=%g,%g,%g,%g c4=%g,%g,%g,%g c5=%g,%g,%g,%g\n",
+                        self, pass, g_rs[194],
+                        g_smp_raw[0][11], g_smp_raw[1][11], g_smp_raw[2][11], g_smp_raw[3][11],
+                        g_psc[3][0], g_psc[3][1], g_psc[3][2], g_psc[3][3],
+                        g_psc[4][0], g_psc[4][1], g_psc[4][2], g_psc[4][3],
+                        g_psc[5][0], g_psc[5][1], g_psc[5][2], g_psc[5][3]);
             if(vs && com_valid(vs)){ g_raw_vs=vs; g_cur_vs=MR32(vs+12u); if(g_cur_vs>=MAXVS)g_cur_vs=0; }
             if(ps && com_valid(ps)){ g_raw_ps=ps; g_cur_ps_id=(int)MR32(ps+12u); }
             g_cur_tex=(tex && mem_is_committed(tex+28u))?MR32(tex+28u):0u;
@@ -3915,9 +3946,9 @@ int com_call(CPU *c, uint32_t magic){
                             if (!mem_is_committed((uint32_t)(page << 14))){ committed=0; break; }
                         }
                         if (committed){
-                            if (pt==5u && ((g_posproj_pass_uvs==4u && stride==48u && (nprim==2u || nprim==22u)) ||
-                                           (g_posproj_pass_uvs==1u && stride==24u && nprim==2u)))
-                                draw_posproj((uint32_t)addr,(uint32_t)nv,pt,stride,g_posproj_pass_uvs);
+                            unsigned puvs=fo2_posproj_stream_uvs(g_posproj_pass_uvs,stride,pt,(uint32_t)nv);
+                            if (puvs)
+                                draw_posproj((uint32_t)addr,(uint32_t)nv,pt,stride,puvs);
                             else draw_up(pt, (uint32_t)nv, (uint32_t)addr, stride);
                         }
                     }
@@ -3938,7 +3969,9 @@ int com_call(CPU *c, uint32_t magic){
                     int up_ok = vp && stride && pt >= 2u && pt <= 6u && nv >= 2u && nv < 4096u &&
                                 mem_is_committed(vp) && mem_is_committed(vp + nv*stride - 1);
                     if (up_ok){
-                        draw_up(pt, nv, vp, stride);
+                        unsigned puvs=fo2_posproj_stream_uvs(g_posproj_pass_uvs,stride,pt,nv);
+                        if (puvs) draw_posproj(vp,nv,pt,stride,puvs);
+                        else draw_up(pt, nv, vp, stride);
                         if (glow_on()) glow_draw256(nprim, c->eip);
                     } else if (glow_on() && glow_take(&g_glow_up_n, 64u))
                         fprintf(stderr,"[glow] up-drop pt=%u nv=%u stride=%u vp=%08x committed=%u\n",
@@ -4740,15 +4773,15 @@ int com_call(CPU *c, uint32_t magic){
             unsigned sl=(src && mem_is_committed(src+31)) ? MR32(src+24) : 0u;
             unsigned dl=(dst && mem_is_committed(dst+31)) ? MR32(dst+24) : 0u;
             unsigned nl=sl<dl?sl:dl;
-            if (!nl) nl=1; if (nl>8) nl=8;
+            if (!nl) nl=1; if (nl>TEX_MIP_SLOTS) nl=TEX_MIP_SLOTS;
             static unsigned fo2_update_note;
             if (fo2_update_note++ < 12u)
                 fprintf(stderr,"[fo2-update] src=%08x %ux%u fmt=%u levels=%u -> dst=%08x %ux%u fmt=%u levels=%u\\n",
                         src,sw,sh,sf,sl,dst,dw,dh,df,dl);
             if (src && dst && sw==dw && sh==dh && sf==df){
                 for (unsigned lv=0; lv<nl; lv++){
-                    uint32_t sb=MR32(src+32u+4u*lv);
-                    uint32_t db=MR32(dst+32u+4u*lv);
+                    uint32_t sb=MR32(src+tex_mip_lock_offset(lv));
+                    uint32_t db=MR32(dst+tex_mip_lock_offset(lv));
                     unsigned pitch=metal_level_pitch(sw,lv,sf);
                     unsigned rows=metal_level_rows(sh,lv,sf);
                     size_t bytes=(size_t)pitch*rows;
@@ -4756,7 +4789,7 @@ int com_call(CPU *c, uint32_t magic){
                         !mem_is_committed(sb) || (uint64_t)sb+bytes > GUEST_END) continue;
                     if (lv==0u && ui_tex_trace_match(sw,sh,sf))
                         ui_tex_trace_data("update-source",src,MR32(dst+28),g_mem+sb,bytes,pitch);
-                    if (!db){ db=gbuf_alloc((uint32_t)bytes+64u); MR32(dst+32u+4u*lv)=db; }
+                    if (!db){ db=gbuf_alloc((uint32_t)bytes+64u); MR32(dst+tex_mip_lock_offset(lv))=db; }
                     if (!db || !mem_is_committed(db) || (uint64_t)db+bytes > GUEST_END) continue;
                     memcpy(g_mem+db,g_mem+sb,bytes);
                     if (ENVC("FO2_SHA_BIND_TRACE")){ static unsigned nu; if(nu++<512u) fprintf(stderr,"[tex-prov] update-upload src=%08x dst=%08x tid=%u level=%u %ux%u pitch=%u fmt=%u bytes=%zu\n",src,dst,MR32(dst+28),lv,sw,sh,pitch,sf,bytes); }
@@ -4935,11 +4968,12 @@ int com_call(CPU *c, uint32_t magic){
                     fprintf(stderr,"  [RT-tex] %ux%u -> %ux%u (NFSRES)\n", w,h,g_bb_w,g_bb_h); }
                 w = g_bb_w; h = g_bb_h;
             }
-            uint32_t pp=A(c,7); uint32_t t=com_new(IF_TEX,160);   /* +64..+103: child surfaces */
-            MR32(t+4)=w; MR32(t+8)=h; MR32(t+20)=fmt; MR32(t+24)=lev?lev:1u;
+            uint32_t pp=A(c,7); uint32_t t=com_new(IF_TEX,TEX_OBJECT_BYTES);
+            uint32_t levels=tex_mip_count(w,h,lev);
+            MR32(t+4)=w; MR32(t+8)=h; MR32(t+20)=fmt; MR32(t+24)=levels;
             /* HD build: reflection targets grow in Metal while the game keeps
              * seeing the old size (not compiled in the original build). */
-            uint32_t mw = w, mh = h, mlev = lev ? lev : 1u;
+            uint32_t mw = w, mh = h, mlev = levels;
             int ekind = (usage & 1u) ? enh_rt_size(c->eip, g_bb_w, g_bb_h, &mw, &mh) : ENH_NONE;
             /* Road reflection: full mip chain for the blur pass (see enhance.c). */
             if (ekind == ENH_ROAD){ mlev = 1u; for (uint32_t q = mw > mh ? mw : mh; q > 1u; q >>= 1) mlev++; }
@@ -4956,7 +4990,7 @@ int com_call(CPU *c, uint32_t magic){
                     static int sr3=0;
                     if (sr3<6){ sr3++;
                         fprintf(stderr,"  [RT-tex] %ux%u fmt=%u levels=%u -> id=%u\n",
-                                w,h,fmt,lev?lev:1u,tid); } }
+                                w,h,fmt,levels,tid); } }
                 if (tid && !(usage & 1u)) texrep_created(tid, w, h, mlev, fmt, usage, pool);
                 if (!tid){ g_tex_fail++;
                     static uint32_t bad[16]; static int nb=0; int seen=0;
@@ -5021,7 +5055,7 @@ int com_call(CPU *c, uint32_t magic){
             }
             if(pp) MR32(pp)=sf; r=0;
           cube_done:; }
-        else if (MID(CreateVolumeTexture)){ uint32_t pp=A(c,8); if(pp) MR32(pp)=com_new(IF_TEX,160); r=0; }   /* same layout as 2D (child slots) */
+        else if (MID(CreateVolumeTexture)){ uint32_t pp=A(c,8); if(pp) MR32(pp)=com_new(IF_TEX,TEX_OBJECT_BYTES); r=0; }   /* same layout as 2D (child slots) */
         else if (MID(CreateVertexBuffer)){
             uint32_t pp=A(c,5); uint32_t b=com_new(IF_VB,64);
             MR32(b+4)=A(c,1); MR32(b+8)=gbuf_alloc(A(c,1)?A(c,1):64);
@@ -5313,13 +5347,14 @@ int com_call(CPU *c, uint32_t magic){
             uint32_t fmt = self?MR32(self+20):21u;
             if(!w) w=256; if(!h) h=256;
             if(w>8192) w=8192; if(h>8192) h=8192;
-            if(level>7) level=7;
+            if (is_cube){ if(level>7u) level=7u; }
+            else if(level>=TEX_MIP_SLOTS) level=TEX_MIP_SLOTS-1u;
             uint32_t pitch = metal_available() ? metal_level_pitch(w,level,fmt) : 0;
             uint32_t rows  = metal_available() ? metal_level_rows(h,level,fmt)  : 0;
             if(!pitch){ uint32_t lw=w>>level; if(!lw)lw=1; pitch=lw*4u; }
             if(!rows){  uint32_t lh=h>>level; if(!lh)lh=1; rows=lh; }
             uint32_t slot = self ? (is_cube ? (self + 104u + 4u*(face & 7u))
-                                            : (self + 32u + 4u*level)) : 0;
+                                            : (self + tex_mip_lock_offset(level))) : 0;
             uint32_t buf = slot ? MR32(slot) : 0;
             if(!buf){ buf = gbuf_alloc(pitch*rows + 64u); if(slot) MR32(slot)=buf; }
             if (level==0u && ui_tex_trace_match(w,h,fmt))
@@ -5339,11 +5374,12 @@ int com_call(CPU *c, uint32_t magic){
             int is_cube2 = (iface==IF_TEX && is_cube_tex(self));
             uint32_t face2 = is_cube2 ? A(c,1) : 0u;
             uint32_t level = is_cube2 ? A(c,2) : ((iface==IF_TEX) ? A(c,1) : 0u);
-            if(level>7) level=7;
+            if (is_cube2){ if(level>7u) level=7u; }
+            else if(level>=TEX_MIP_SLOTS) level=TEX_MIP_SLOTS-1u;
             uint32_t w = self?MR32(self+4):0, h = self?MR32(self+8):0;
             uint32_t fmt = self?MR32(self+20):21u, mid = self?MR32(self+28):0;
             uint32_t buf = self ? (is_cube2 ? MR32(self + 104u + 4u*(face2 & 7u))
-                                             : MR32(self + 32u + 4u*level)) : 0;
+                                             : MR32(self + tex_mip_lock_offset(level))) : 0;
             if (level==0u && ui_tex_trace_match(w,h,fmt))
                 ui_tex_trace_data("unlock",self,mid,buf?g_mem+buf:NULL,
                                   (size_t)metal_level_pitch(w,level,fmt)*
@@ -5352,7 +5388,9 @@ int com_call(CPU *c, uint32_t magic){
             if (ENVC("FO2_SHA_BIND_TRACE")){ static unsigned nu; if(nu++<512u) fprintf(stderr,"[tex-prov] unlock-upload obj=%08x tid=%u cube=%d face=%u level=%u %ux%u fmt=%u pitch=%u buf=%08x\n",self,mid,is_cube2,face2,level,w,h,fmt,metal_level_pitch(w,level,fmt),buf); }
             gheap_check_block(c, buf, "LOCK BUFFER OVERRUN (UnlockRect)");   /* NFSU2_HEAPCHECK only */
             if (metal_available() && mid && buf && w && h){
-                if (is_cube2) metal_upload_texture_face(mid,level,face2,g_mem+buf,
+                if (iface==IF_SURF) d3dx_upload_surface(self,mid,g_mem+buf,
+                                     metal_level_pitch(w,0,fmt),w,h,fmt);
+                else if (is_cube2) metal_upload_texture_face(mid,level,face2,g_mem+buf,
                                      metal_level_pitch(w,level,fmt),w,h,fmt);
                 else metal_upload_texture(mid,level,g_mem+buf,
                                      metal_level_pitch(w,level,fmt),w,h,fmt);
@@ -5395,12 +5433,14 @@ int com_call(CPU *c, uint32_t magic){
             if (!sf){ if(pp) MR32(pp)=0; r=0x8007000Eu; goto surf_done; }
             com_addref(self0);
             MR32(sf+40)=2;
+            MR32(sf+48)=lvl3;
             /* Keep the cube face on the cached surface. D3DX surface copies
              * and SetRenderTarget both use this marker to address that face. */
             if (cube3) MR32(sf+44) = (face3 < 6u) ? face3 + 1u : 1u;
             uint32_t self=A(c,0);
             if (self && mem_is_committed(self+31)){
-                MR32(sf+4)=MR32(self+4); MR32(sf+8)=MR32(self+8);
+                MR32(sf+4)=tex_mip_extent(MR32(self+4),lvl3);
+                MR32(sf+8)=tex_mip_extent(MR32(self+8),lvl3);
                 MR32(sf+20)=MR32(self+20); MR32(sf+28)=MR32(self+28);
             }
             if(pp) MR32(pp)=sf; r=0;
@@ -5416,6 +5456,9 @@ int com_call(CPU *c, uint32_t magic){
             uint32_t p=A(c,nargs-1);
             if(p){ mem_commit(p,32); memset(g_mem+p,0,32);
                 uint32_t fw = self?MR32(self+4):256, fh = self?MR32(self+8):256;
+                if (MID(GetLevelDesc)){
+                    fw=tex_mip_extent(fw,A(c,1)); fh=tex_mip_extent(fh,A(c,1));
+                }
                 uint32_t ff = self?MR32(self+20):0;
                 if (!fw) fw = 640; if (!fh) fh = 480;
                 if (!ff) ff = 22;                    /* D3DFMT_X8R8G8B8 */
