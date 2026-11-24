@@ -27,6 +27,10 @@ export interface RendererOptions extends CommonOptions {
   dumpScale?: number;
   /** texture ids to log through create/upload/free in the WebGPU encoder */
   watchTex?: number[];
+  /** maximum submitted frames awaiting the GPU (the FlatOut launcher calls three Triple Buffering) */
+  maxInFlight?: number;
+  /** FlatOut launcher AA choice: off, 2, 4, or auto (the WebGPU renderer maps auto conservatively) */
+  antialiasing?: string;
   /** the GPU device was lost while the game ran (a graphics driver reset, the browser's graphics process
    *  crashed): nothing is drawn from then on */
   onLost?(): void;

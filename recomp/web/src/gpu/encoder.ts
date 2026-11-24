@@ -85,13 +85,15 @@ export class Encoder {
   private white!: Tex; private whiteCube!: Tex;
   private zTex: (GPUTexture | undefined)[] = [];
   private zView: (GPUTextureView | undefined)[] = [];
+  private zMsaaTex: (GPUTexture | undefined)[] = [];
+  private zMsaaView: (GPUTextureView | undefined)[] = [];
   private zpend = new Uint8Array(64); private zpendV = new Float32Array(64);
   private scratchZ = new Map<string, GPUTextureView>();
   private pool: GPUBuffer | null = null;
   private vsMods = new Map<number, GPUShaderModule>();
   private psMods = new Map<number, GPUShaderModule>();
   private samplers = new Map<number, GPUSampler>();
-  private pipes = new Map<number, GPURenderPipeline | null>();
+  private pipes = new Map<string, GPURenderPipeline | null>();
   private bg1 = new Map<string, GPUBindGroup>();
   private destroyLater: { destroy(): void }[] = [];
 
@@ -116,6 +118,9 @@ export class Encoder {
   // back buffer (the game's device-size "screen"), and the texture the current frame
   // draws its screen into: the back buffer, or the canvas texture when sizes match
   bb: GPUTexture | null = null; private bbView: GPUTextureView | null = null;
+  /** Multisample screen attachment.  Every scene pass resolves it into bb, which remains
+   * single sample so D3D screen reads, blits, dumps, and presentation can sample/copy it. */
+  private bbMsaa: GPUTexture | null = null; private bbMsaaView: GPUTextureView | null = null;
   screen: GPUTexture | null = null; screenView: GPUTextureView | null = null;
   /** frames that copied from the screen before drawing to it (they keep the back buffer) */
   screenReadFirst = 0;
@@ -139,7 +144,8 @@ export class Encoder {
   calls = { pipe: 0, bg0: 0, bg1: 0, bg1New: 0, blend: 0, ix: 0, draw: 0, pass: 0, copy: 0 };
   private seenFmt = new Set<string>();
 
-  constructor(device: GPUDevice, memory: WebAssembly.Memory, ctlPtr: number, log: (s: string) => void) {
+  constructor(device: GPUDevice, memory: WebAssembly.Memory, ctlPtr: number, log: (s: string) => void,
+              private sampleCount: 1 | 2 | 4 = 1) {
     this.device = device; this.queue = device.queue; this.memory = memory; this.ctlW = ctlPtr >> 2; this.log = log;
     const f = device.features;
     this.feat = { bc: f.has('texture-compression-bc'), astc: f.has('texture-compression-astc'), swizzle: f.has('texture-component-swizzle'),
@@ -226,7 +232,10 @@ export class Encoder {
           this.warmUp();
           break;
         }
-        case Op.ZForget: if (a0 < 64 && this.zTex[a0]) { this.zTex[a0]!.destroy(); this.zTex[a0] = undefined; this.zView[a0] = undefined; } break;
+        case Op.ZForget: if (a0 < 64) {
+          this.zTex[a0]?.destroy(); this.zTex[a0] = undefined; this.zView[a0] = undefined;
+          this.zMsaaTex[a0]?.destroy(); this.zMsaaTex[a0] = undefined; this.zMsaaView[a0] = undefined;
+        } break;
         default: this.log(`[gpu] unknown resource op ${op}`);
       }
       tail = (tail + len) >>> 0;
@@ -430,7 +439,8 @@ export class Encoder {
     pass.end();
   }
 
-  private pipeDesc(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean): GPURenderPipelineDescriptor | null {
+  private pipeDesc(key: string, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean,
+                   samples: number): GPURenderPipelineDescriptor | null {
     // the translator's modules (vs_0 / ps_0 / ps_256 included once registered), else the built-in fallbacks
     const cubeMask = cubeMaskForPs(ps), cube = cubeMask !== 0;
     const vq = this.vsMods.get(vs), pq = this.psMods.get(ps);
@@ -454,12 +464,14 @@ export class Encoder {
         constants: { ALPHA_FUNC: alphaFunc(nd ? 0 : 1) } },
       primitive: { topology: 'triangle-list', frontFace: 'cw', cullMode: cull === 1 ? 'none' : cull === 2 ? 'front' : 'back' },
       depthStencil: { format: 'depth32float', depthWriteEnabled: (dm & 2) !== 0, depthCompare: (dm & 1) ? CMP[(dm >> 2) & 7] : 'always' },
+      multisample: { count: samples },
     };
   }
 
   /** a pipeline needed now: created synchronously (a first use may hitch; warmUp() avoids most) */
-  private pipeline(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean): GPURenderPipeline | null {
-    const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd);
+  private pipeline(key: string, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean,
+                   samples: number): GPURenderPipeline | null {
+    const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, samples);
     if (!desc) { this.pipes.set(key, null); return null; }
     this.device.pushErrorScope('validation');
     const tp = performance.now();
@@ -472,8 +484,8 @@ export class Encoder {
     // remember it for the next session, by the modules' text hashes
     const vh = this.vsHash.get(vs), ph = this.psHash.get(ps);
     if (vh !== undefined && ph !== undefined) {
-      const st = blend + cull * 262144 + dm * 1048576 + (nd ? 67108864 : 0), k = `${vh}:${ph}:${st}`;
-      if (!this.warmSeen.has(k)) { this.warmSeen.add(k); this.warmList.push({ v: vh, p: ph, s: st }); this.warmDirty = true; }
+      const st = blend + cull * 262144 + dm * 1048576 + (nd ? 67108864 : 0), k = `${vh}:${ph}:${st}:${samples}`;
+      if (!this.warmSeen.has(k)) { this.warmSeen.add(k); this.warmList.push({ v: vh, p: ph, s: st, n: samples }); this.warmDirty = true; }
     }
     return p;
   }
@@ -481,24 +493,24 @@ export class Encoder {
   // ---- pipeline warm-up: what earlier sessions used, created asynchronously as soon as both modules exist ----
   private vsHash = new Map<number, number>(); private psHash = new Map<number, number>();
   private vsByHash = new Map<number, number>(); private psByHash = new Map<number, number>();
-  private warmList: { v: number; p: number; s: number }[] = [];
+  private warmList: { v: number; p: number; s: number; n?: number }[] = [];
   private warmSeen = new Set<string>();
-  private warmTodo: { v: number; p: number; s: number }[] = [];
+  private warmTodo: { v: number; p: number; s: number; n?: number }[] = [];
   warmDirty = false; pipelinesSync = 0; pipelinesAsync = 0;
   /** time spent creating pipelines synchronously on the encoder (total, worst) */
   pipeMs = 0; pipeMsMax = 0;
 
   /** the persisted list from an earlier session */
-  loadWarm(list: { v: number; p: number; s: number }[]): void {
+  loadWarm(list: { v: number; p: number; s: number; n?: number }[]): void {
     for (const e of list) {
-      const k = `${e.v}:${e.p}:${e.s}`;
+      const k = `${e.v}:${e.p}:${e.s}:${e.n ?? 1}`;
       if (this.warmSeen.has(k)) continue;
       this.warmSeen.add(k); this.warmList.push(e); this.warmTodo.push(e);
     }
     this.warmUp();
   }
   /** the list to persist */
-  warmEntries(): { v: number; p: number; s: number }[] { this.warmDirty = false; return this.warmList; }
+  warmEntries(): { v: number; p: number; s: number; n?: number }[] { this.warmDirty = false; return this.warmList; }
 
   private warmUp(): void {
     if (!this.warmTodo.length) return;
@@ -506,9 +518,10 @@ export class Encoder {
       const vs = this.vsByHash.get(e.v), ps = this.psByHash.get(e.p);
       if (vs === undefined || ps === undefined) return true;
       const blend = e.s % 262144, cull = Math.floor(e.s / 262144) % 4, dm = Math.floor(e.s / 1048576) % 64, nd = e.s >= 67108864;
-      const key = blend + ps * 262144 + vs * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0);
+      const samples = e.n ?? 1;
+      const key = `${blend}:${ps}:${vs}:${cull}:${dm}:${nd ? 1 : 0}:${samples}`;
       if (this.pipes.has(key)) return false;
-      const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd);
+      const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, samples);
       if (!desc) return false;
       this.device.createRenderPipelineAsync(desc).then(p => {
         if (!this.pipes.has(key)) { this.pipes.set(key, p); this.pipelinesMade++; this.pipelinesAsync++; }
@@ -533,11 +546,11 @@ export class Encoder {
     return g;
   }
 
-  private depthView(zid: number, w: number, h: number): GPUTextureView {
-    const k = `${w}x${h}`;
+  private depthView(zid: number, w: number, h: number, samples = 1): GPUTextureView {
+    const k = `${w}x${h}/${samples}`;
     let v = this.scratchZ.get(k);
     if (!v) {
-      v = this.device.createTexture({ label: `scratch-z ${k}`, size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT }).createView();
+      v = this.device.createTexture({ label: `scratch-z ${k}`, size: [w, h], sampleCount: samples, format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT }).createView();
       this.scratchZ.set(k, v);
     }
     void zid;
@@ -545,11 +558,17 @@ export class Encoder {
   }
 
   private ensureBackBuffer(w: number, h: number): void {
-    if (this.bb && this.bb.width === w && this.bb.height === h) return;
+    if (this.bb && this.bb.width === w && this.bb.height === h && (this.sampleCount === 1 || this.bbMsaa)) return;
     if (this.bb) this.destroyLater.push(this.bb);
+    if (this.bbMsaa) this.destroyLater.push(this.bbMsaa);
     this.bb = this.device.createTexture({ label: `backbuffer ${w}x${h}`, size: [w, h], format: 'bgra8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
     this.bbView = this.bb.createView();
+    if (this.sampleCount > 1) {
+      this.bbMsaa = this.device.createTexture({ label: `backbuffer MSAA ${this.sampleCount}x ${w}x${h}`, size: [w, h], sampleCount: this.sampleCount,
+        format: 'bgra8unorm', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      this.bbMsaaView = this.bbMsaa.createView();
+    } else { this.bbMsaa = null; this.bbMsaaView = null; }
     this.log(`[gpu] back buffer ${w}x${h}`);
   }
 
@@ -572,6 +591,32 @@ export class Encoder {
     return false;
   }
 
+  /** A resolve texture cannot be loaded into an MSAA attachment.  Preserve the
+   * stream's exact screen-blit ordering by rendering these frames single-sample. */
+  private blitsToScreen(drawsW: number, dn: number): boolean {
+    for (let i = 0; i < dn; i++) {
+      const w = drawsW + i * P.DRAW_WORDS;
+      if (this.u32[w + D.kind] === Kind.Blit && !this.u32[w + D.target]) return true;
+    }
+    return false;
+  }
+
+  /** A D3D depth surface may be rebound between the screen and an offscreen
+   * target.  Those attachments must have one sample count, so keep that frame
+   * 1x rather than silently splitting the surface into unrelated depth buffers. */
+  private sharesScreenDepth(drawsW: number, dn: number): boolean {
+    const use = new Uint8Array(64);
+    for (let i = 0; i < dn; i++) {
+      const w = drawsW + i * P.DRAW_WORDS;
+      if (this.u32[w + D.kind] === Kind.Blit) continue;
+      const zid = this.u32[w + D.depth] >>> 8;
+      if (!zid || zid >= use.length) continue;
+      use[zid] |= this.u32[w + D.target] ? 2 : 1;
+      if (use[zid] === 3) return true;
+    }
+    return false;
+  }
+
   /** Encode the frame in record buffer `b` into `enc`.  The canvas composite and
    * the submit are the caller's.  With `direct`, a bgra8unorm texture with
    * RENDER_ATTACHMENT, TEXTURE_BINDING, COPY_SRC and COPY_DST usage (the canvas
@@ -585,7 +630,15 @@ export class Encoder {
     const dn = u32[fw + F.dn], vn = u32[fw + F.vn], rvn = u32[fw + F.rvn], kn = u32[fw + F.kn];
     const drawsW = u32[fw + F.draws] >> 2, pscW = u32[fw + F.psc] >> 2;
     const bbW = u32[fw + F.bbW] || 1280, bbH = u32[fw + F.bbH] || 720;
-    let isDirect = !!direct && direct.width === bbW && direct.height === bbH;
+    const msaaFallback = this.blitsToScreen(drawsW, dn) || this.sharesScreenDepth(drawsW, dn);
+    const frameSamples = this.sampleCount > 1 && !msaaFallback ? this.sampleCount : 1;
+    if (this.sampleCount > 1 && frameSamples === 1 && !this.seenFmt.has('msaa-screen-blit')) {
+      this.seenFmt.add('msaa-screen-blit');
+      this.log('[gpu] MSAA: frames with a blit to the screen or shared screen/offscreen depth use 1x to preserve D3D ordering');
+    }
+    // Keep the resolved back buffer across all AA frames, including a 1x
+    // screen-blit fallback, so a later screen-read-first record sees it.
+    let isDirect = this.sampleCount === 1 && !!direct && direct.width === bbW && direct.height === bbH;
     if (isDirect && this.readsScreenFirst(drawsW, dn)) {
       if (this.screenReadFirst++ === 0) this.log(`[gpu] frame ${u32[fw + F.seq]} copies from the screen before drawing to it: drawn into the back buffer`);
       isDirect = false;
@@ -594,11 +647,12 @@ export class Encoder {
       this.screen = direct!; this.screenView = direct!.createView();
       // the back buffer of earlier frames (before the canvas size settled) is not needed
       if (this.bb) { this.destroyLater.push(this.bb); this.bb = null; this.bbView = null; }
+      if (this.bbMsaa) { this.destroyLater.push(this.bbMsaa); this.bbMsaa = null; this.bbMsaaView = null; }
     } else { this.ensureBackBuffer(bbW, bbH); this.screen = this.bb; this.screenView = this.bbView; }
     const seq = u32[fw + F.seq];
     this.tr = this.traceSeq.has(seq) || (this.traceDumps && u32[fw + F.dump]) ? [] : null;
     const tr = this.tr;
-    if (tr) tr.push(`[trace] frame ${seq}: ${dn} records, ${vn} tverts, raw ${rvn} B, consts ${kn} B, back buffer ${bbW}x${bbH}, clear ${u32[fw + F.clearArgb].toString(16)}`);
+    if (tr) tr.push(`[trace] frame ${seq}: ${dn} records, ${vn} tverts, raw ${rvn} B, consts ${kn} B, back buffer ${bbW}x${bbH}, ${frameSamples}x samples, clear ${u32[fw + F.clearArgb].toString(16)}`);
 
     // arenas: one writeBuffer each, in the queue before this frame's submit
     const SV = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, UV = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
@@ -620,7 +674,7 @@ export class Encoder {
     // the pass's size, and the scissor in effect in it (a GwDraw.clip value; 0 = the whole target)
     let passW = 0, passH = 0, cClip = 0;
     // the previous draw's pipeline (pipelines outlive passes, so this survives a pass change)
-    let lastKey = -1, lastPipe: GPURenderPipeline | null | undefined;
+    let lastKey = '', lastPipe: GPURenderPipeline | null | undefined;
     const b1 = this.b1, dyn = this.dyn;
     b1[0] = -1;
     let draws = 0, passes = 0, skipped = 0;
@@ -628,8 +682,13 @@ export class Encoder {
     const endPass = () => { if (pass) { pass.end(); pass = null; } };
 
     const openPass = (target: number, zid: number): GPURenderPassEncoder | null => {
-      let view: GPUTextureView, w: number, h: number, key: number;
-      if (!target) { view = this.screenView!; w = bbW; h = bbH; key = -1; passCube = -1; }
+      let view: GPUTextureView, resolveTarget: GPUTextureView | undefined, w: number, h: number, key: number;
+      const screenMsaa = !target && frameSamples > 1;
+      if (!target) {
+        view = screenMsaa ? this.bbMsaaView! : this.screenView!;
+        resolveTarget = screenMsaa ? this.screenView! : undefined;
+        w = bbW; h = bbH; key = -1; passCube = -1;
+      }
       else {
         const t = this.tex[target & 0xFFFF], face = (target >>> 16) & 7;
         if (!t || !t.rt) { this.missingTarget++; return null; }
@@ -641,26 +700,28 @@ export class Encoder {
       const first = key === -1 ? !screenTouched : !touched.has(key);
       let zv: GPUTextureView | undefined, zclear = false, zval = 1;
       if (zid && zid < 64) {
-        let z = this.zTex[zid];
+        const zs = screenMsaa ? this.zMsaaTex : this.zTex, zvv = screenMsaa ? this.zMsaaView : this.zView;
+        let z = zs[zid];
         if (!z || z.width !== w || z.height !== h) {
           if (!z || zid === 1) {
             if (z) this.destroyLater.push(z);
-            z = this.zTex[zid] = dev.createTexture({ label: `z${zid} ${w}x${h}`, size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
-            this.zView[zid] = z.createView(); zclear = true;
+            z = zs[zid] = dev.createTexture({ label: `${screenMsaa ? 'MSAA ' : ''}z${zid} ${w}x${h}`, size: [w, h], sampleCount: screenMsaa ? frameSamples : 1,
+              format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+            zvv[zid] = z.createView(); zclear = true;
           } else { z = undefined; this.zMismatch++; }
         }
-        if (z) { zv = this.zView[zid]; if (this.zpend[zid]) { zclear = true; zval = this.zpendV[zid]; this.zpend[zid] = 0; } }
+        if (z) { zv = zvv[zid]; if (this.zpend[zid]) { zclear = true; zval = this.zpendV[zid]; this.zpend[zid] = 0; } }
       }
       realZ = !!zv;
       const c = clearArgb;
       const ts = this.firstPassTs; this.firstPassTs = undefined;
       const p = enc.beginRenderPass({
         timestampWrites: ts,
-        colorAttachments: [{ view, loadOp: first ? 'clear' : 'load', storeOp: 'store',
+        colorAttachments: [{ view, resolveTarget, loadOp: first ? 'clear' : 'load', storeOp: 'store',
           clearValue: { r: ((c >>> 16) & 255) / 255, g: ((c >>> 8) & 255) / 255, b: (c & 255) / 255, a: 1 } }],
         depthStencilAttachment: zv
           ? { view: zv, depthLoadOp: zclear ? 'clear' : 'load', depthClearValue: zval, depthStoreOp: 'store' }
-          : { view: this.depthView(0, w, h), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'discard' },
+          : { view: this.depthView(0, w, h, screenMsaa ? frameSamples : 1), depthLoadOp: 'clear', depthClearValue: 1, depthStoreOp: 'discard' },
       });
       if (key === -1) screenTouched = true; else touched.add(key);
       passes++; this.calls.pass++;
@@ -724,9 +785,9 @@ export class Encoder {
       let psEff = psid > 0 && this.psMods.has(psid) ? psid : psid >= PSCUBE ? PSCUBE : 0;
       if (psEff === 0 && t0 && this.tex[t0]?.cube) psEff = PSCUBE;
       const nd = !(aref > 0);
-      const key = blend + psEff * 262144 + vsid * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0);
+      const key = `${blend}:${psEff}:${vsid}:${cull}:${dm}:${nd ? 1 : 0}:${target ? 1 : frameSamples}`;
       let pipe = key === lastKey ? lastPipe : this.pipes.get(key);
-      if (pipe === undefined) pipe = this.pipeline(key, blend, psEff, vsid, cull, dm, nd);
+      if (pipe === undefined) pipe = this.pipeline(key, blend, psEff, vsid, cull, dm, nd, target ? 1 : frameSamples);
       lastKey = key; lastPipe = pipe;
       if (!pipe) { skipped++; if (tr) tr.push(`  #${i} draw skipped: no pipeline (ps ${psEff} vs ${vsid})`); continue; }
       if (pipe !== cPipe) { p.setPipeline(pipe); cPipe = pipe; this.calls.pipe++; }
@@ -895,7 +956,9 @@ export class Encoder {
     }
     if (!screenTouched) {
       const c = clearArgb;
-      enc.beginRenderPass({ colorAttachments: [{ view: this.screenView!, loadOp: 'clear', storeOp: 'store',
+      const msaa = frameSamples > 1;
+      enc.beginRenderPass({ colorAttachments: [{ view: msaa ? this.bbMsaaView! : this.screenView!, resolveTarget: msaa ? this.screenView! : undefined,
+        loadOp: 'clear', storeOp: 'store',
         clearValue: { r: ((c >>> 16) & 255) / 255, g: ((c >>> 8) & 255) / 255, b: (c & 255) / 255, a: 1 } }] }).end();
       passes++;
     }

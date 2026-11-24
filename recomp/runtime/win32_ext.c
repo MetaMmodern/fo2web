@@ -1205,6 +1205,43 @@ static struct { char name[64]; int is_str; uint32_t dw; char sv[128]; } g_reg[MA
 static int g_regn = 0;
 static int g_reg_loaded = 0;
 
+/* Launcher choices exposed by the web page.  The original launcher writes
+ * these before FlatOut starts; in the browser settings.ini is the durable
+ * per-device UI, so fold its explicit values over the registry in memory.
+ * Do not save them here: removing a setting must reveal the registry value
+ * the game last chose. */
+static void reg_launcher_dword(const char *name, uint32_t value){
+    for (int i = 0; i < g_regn; i++) if (!strcasecmp(g_reg[i].name, name)){
+        g_reg[i].is_str = 0; g_reg[i].dw = value; return;
+    }
+    if (g_regn >= MAXREG) return;
+    snprintf(g_reg[g_regn].name, sizeof g_reg[g_regn].name, "%s", name);
+    g_reg[g_regn].is_str = 0; g_reg[g_regn].dw = value; g_regn++;
+}
+static int env_on(const char *name, int *set){
+    const char *v = getenv(name);
+    *set = v && *v;
+    return *set && strcmp(v, "0") && strcasecmp(v, "off") && strcasecmp(v, "false");
+}
+static void reg_launcher_options(void){
+    const char *aa = getenv("NFSU2_FO2_ANTIALIASING");
+    if (aa && *aa) {
+        uint32_t n = !strcasecmp(aa, "auto") ? 0xffffffffu : (uint32_t)strtoul(aa, 0, 10);
+        reg_launcher_dword("g_FSAALevel", n);
+    }
+    const char *aniso = getenv("NFSU2_FO2_ANISOTROPY");
+    if (aniso && *aniso)
+        /* FlatOut's registry has quality levels, not literal WebGPU degrees:
+         * 0 disables it; every requested degree selects its highest level. */
+        reg_launcher_dword("g_TextureFiltering", !strcasecmp(aniso, "off") || !strcmp(aniso, "0") ? 0u : 2u);
+    int set = 0, on = env_on("NFSU2_FO2_POST_PROCESSING", &set);
+    if (set) {
+        const char *effects[] = { "g_MotionBlurEnable", "g_LightStreaksEnable", "g_LightGlowEnable",
+                                  "g_DepthOfFieldEnable", "g_OverBrightEnable", "g_BleachByPassEnable", "g_TintingEnable" };
+        for (unsigned i = 0; i < sizeof effects / sizeof effects[0]; i++) reg_launcher_dword(effects[i], on ? 1u : 0u);
+    }
+}
+
 static const char *reg_path(void){
     static char pth[512];
     /* NFSU2_REGFILE=<path>: lets test runs use their own registry file */
@@ -1234,6 +1271,7 @@ static void reg_load(void){
         (void)isstr;
     }
     fclose(f);
+    reg_launcher_options();
 }
 /* Written to "<file>.tmp" and renamed over the old file, so quitting (or a
  * crash) in the middle of the game's 29 back-to-back RegSetValueExA calls

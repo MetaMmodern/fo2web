@@ -842,15 +842,25 @@ static void view_follow(void){
     fprintf(stderr, "[gpu] canvas %ux%u (device chosen for %ux%u): requesting a device reset\n", w, h, g_view_used_w, g_view_used_h);
     com_request_reset();
 }
-/* a size with the game's own aspect that fills the view (pillarboxed), as
- * metal.m does for the screen */
+/* A native-size device fills the requested FlatOut launcher aspect within the
+ * browser view.  The game itself only offers 4:3 modes, so a 16:9 or 16:10
+ * choice has to happen here, before com.c calculates its game/device mapping.
+ * That mapping then supplies Hor+ projection and the correctly proportioned
+ * HUD; this is not a CSS stretch of the finished image. */
 void metal_native_size(unsigned gw, unsigned gh, unsigned *ow, unsigned *oh){
     if (!ow || !oh) return;
     *ow = gw; *oh = gh;
     if (!gw || !gh) return;
     unsigned vw, vh; view_wh(&vw, &vh);
-    unsigned a = gw, b = gh; while (b){ unsigned t = a % b; a = b; b = t; }
-    unsigned ax = gw / a, ay = gh / a;
+    unsigned ax = gw, ay = gh;
+    const char *aspect = ENVC("NFSU2_FO2_ASPECT_RATIO");
+    if (aspect && (!strcmp(aspect, "16:9") || !strcmp(aspect, "16:10"))){
+        ax = 16; ay = aspect[3] == '9' ? 9 : 10;
+    } else {
+        unsigned a = ax, b = ay;
+        while (b){ unsigned t = a % b; a = b; b = t; }
+        ax /= a; ay /= a;
+    }
     double u = fmin((double)vw / ax, (double)vh / ay);
     unsigned units = (unsigned)u, w = ax * units, h = ay * units;
     if (!units || w <= gw || h <= gh || w > 8192u || h > 8192u) return;

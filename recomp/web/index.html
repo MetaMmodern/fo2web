@@ -64,10 +64,11 @@
           <p class="msg warn" id="override" hidden></p>
         </section>
         <nav class="launch-menu" aria-label="Main menu">
-          <button type="button" class="menu-item primary" id="play" disabled data-i18n>Play</button>
-          <button type="button" class="menu-item" data-panel="controls" aria-haspopup="dialog" data-i18n>Controls</button>
-          <button type="button" class="menu-item" data-panel="game-data" aria-haspopup="dialog">Game data</button>
-          <button type="button" class="menu-item" data-panel="about" aria-haspopup="dialog" data-i18n>About</button>
+           <button type="button" class="menu-item primary" id="play" disabled data-i18n>Play</button>
+           <button type="button" class="menu-item" data-panel="controls" aria-haspopup="dialog" data-i18n>Controls</button>
+           <button type="button" class="menu-item" data-panel="settings" aria-haspopup="dialog" data-i18n>Settings</button>
+           <button type="button" class="menu-item" data-panel="game-data" aria-haspopup="dialog">Game data</button>
+           <button type="button" class="menu-item" data-panel="about" aria-haspopup="dialog" data-i18n>About</button>
         </nav>
       </div>
     </div>
@@ -216,11 +217,15 @@
   </div>
 </main>
 
-<dialog class="dlg launch-dialog" id="dialog-controls" aria-labelledby="dialog-controls-title">
-  <form method="dialog" class="dlg-head"><h2 id="dialog-controls-title" data-i18n>Controls</h2><button class="btn" value="close" data-i18n>Close</button></form>
-  <div data-dialog-content="controls"></div>
-</dialog>
-<dialog class="dlg launch-dialog" id="dialog-game-data" aria-labelledby="dialog-game-data-title">
+  <dialog class="dlg launch-dialog" id="dialog-controls" aria-labelledby="dialog-controls-title">
+    <form method="dialog" class="dlg-head"><h2 id="dialog-controls-title" data-i18n>Controls</h2><button class="btn" value="close" data-i18n>Close</button></form>
+    <div data-dialog-content="controls"></div>
+  </dialog>
+  <dialog class="dlg launch-dialog" id="dialog-settings" aria-labelledby="dialog-settings-title">
+    <form method="dialog" class="dlg-head"><h2 id="dialog-settings-title" data-i18n>Settings</h2><button class="btn" value="close" data-i18n>Close</button></form>
+    <div data-dialog-content="settings"></div>
+  </dialog>
+  <dialog class="dlg launch-dialog" id="dialog-game-data" aria-labelledby="dialog-game-data-title">
   <form method="dialog" class="dlg-head"><h2 id="dialog-game-data-title">Game data</h2><button class="btn" value="close" data-i18n>Close</button></form>
   <div data-dialog-content="game-data"></div>
 </dialog>

@@ -125,6 +125,10 @@ export class GameSession {
     // not awaited one by one: a subsystem waiting for its registration must not hold up the others
     void attach('renderer', () => attachRenderer(s.proc, o.canvas, {
       ...common, width: o.canvas.width, height: o.canvas.height, displayHz: o.displayHz, artifacts: o.artifacts, dumpScale: o.dumpScale,
+      // FlatOut's launcher calls this Triple Buffering.  WebGPU cannot select a
+      // swap-chain mode, but the number of submitted frames is its equivalent.
+      maxInFlight: o.env.NFSU2_FO2_TRIPLE_BUFFERING === '0' ? 2 : 3,
+      antialiasing: o.env.NFSU2_FO2_ANTIALIASING,
       // Car/body/window materials seen in the latest SHA trace, plus the
       // environment maps and diffuse textures needed to correlate D3D handles
       // with WebGPU creation/upload records.

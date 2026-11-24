@@ -13,11 +13,15 @@ function mountLauncherPanels(): void {
     if (source && slot) slot.append(source);
   };
   move('controls');
+  move('settings');
+  // Settings was an unlinked, hidden page section.  Once it is inside the
+  // launcher's dialog, the dialog controls its visibility instead.
+  document.getElementById('settings')?.removeAttribute('hidden');
   move('game-data');
   move('changes', 'about');
   move('about');
   // Dialog headers are visible; retain the original headings for semantics only.
-  for (const id of ['controls-title', 'game-data-title', 'changes-title', 'about-title']) {
+  for (const id of ['controls-title', 'settings-title', 'game-data-title', 'changes-title', 'about-title']) {
     document.getElementById(id)?.setAttribute('hidden', '');
   }
   const runtimeNotes = document.getElementById('about-runtime-notes');

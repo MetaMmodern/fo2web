@@ -82,6 +82,13 @@ export const KEYS: readonly KeyDef[] = [
   { key: 'msaa', env: 'NFSU2_MSAA', kind: 'enum', vals: 'off|2|4|auto', scope: 'mac' },
   { key: 'mirror', env: 'NFSU2_MIRROR', kind: 'enum', vals: 'original|high|#', scope: 'mac' },
   { key: 'texture_filtering', env: 'NFSU2_TEXTURE_FILTERING', kind: 'enum', vals: 'game|anisotropic', scope: 'mac' },
+  // FlatOut 2's launcher video choices.  The runtime maps the game-owned values
+  // to its registry before the executable reads them; buffering is a page option.
+  { key: 'fo2_antialiasing', env: 'NFSU2_FO2_ANTIALIASING', kind: 'enum', vals: 'off|2|4|auto', scope: 'web', device: true },
+  { key: 'fo2_anisotropy', env: 'NFSU2_FO2_ANISOTROPY', kind: 'enum', vals: 'off|2|4|8|16', scope: 'web', device: true },
+  { key: 'fo2_triple_buffering', env: 'NFSU2_FO2_TRIPLE_BUFFERING', kind: 'bool', scope: 'web', device: true },
+  { key: 'fo2_post_processing', env: 'NFSU2_FO2_POST_PROCESSING', kind: 'bool', scope: 'web', device: true },
+  { key: 'fo2_aspect_ratio', env: 'NFSU2_FO2_ASPECT_RATIO', kind: 'enum', vals: '4:3|16:9|16:10', scope: 'web', device: true },
   { key: 'fps_counter', env: 'NFSU2_FPS_COUNTER', kind: 'enum', vals: 'off|on|detailed', scope: 'web', device: true },   // the page draws it
   { key: 'metal_hud', env: 'MTL_HUD_ENABLED', kind: 'bool', scope: 'mac' },
   // frame rate
@@ -302,6 +309,32 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # time and the game's own counters).  F8 cycles it while playing.
 # [NFSU2_FPS_COUNTER]
 #fps_counter = off
+
+# ---- FlatOut 2 video -----------------------------------------------------
+
+# Anti-aliasing.  Off, 2x and 4x configure the browser renderer's multisample
+# screen path.  Auto uses its portable 4x default (the original launcher
+# default was 8x).
+# [NFSU2_FO2_ANTIALIASING]
+#fo2_antialiasing = auto
+
+# Texture anisotropy requested from FlatOut 2's launcher.  It changes the
+# game's texture-filtering registry value.  [NFSU2_FO2_ANISOTROPY]
+#fo2_anisotropy = 16
+
+# Let the browser keep three submitted frames in flight, rather than two.
+# [NFSU2_FO2_TRIPLE_BUFFERING]
+#fo2_triple_buffering = on
+
+# The game's launcher post-processing group (motion blur, glow, depth of
+# field, bleach bypass and tinting).  [NFSU2_FO2_POST_PROCESSING]
+#fo2_post_processing = on
+
+# The picture's intended aspect ratio.  On the next launch, the native game
+# device is fitted to this shape.  Wider modes reproduce FlatOut 2's unpatched
+# behavior by stretching the complete picture, including menus and HUD.
+# [NFSU2_FO2_ASPECT_RATIO]
+#fo2_aspect_ratio = 4:3
 
 # ---- Sound ---------------------------------------------------------------
 

@@ -71,6 +71,12 @@ static void ws_init(void){
         g_movie = opt_is(e, "fill") ? MOV_FILL : opt_is(e, "stretch") ? MOV_STRETCH : MOV_FIT;
     if ((e = getenv("NFSU2_CUTSCENE_BORDERS")) && *e)
         g_brd = (opt_is(e, "off") || *e == '0') ? BRD_OFF : BRD_FULL;
+    /* FlatOut's own launcher aspect choices stretch its complete original
+     * presentation.  Keep that behavior separate from NFSU2_HUD=wide, whose
+     * purpose is the corrected, proportioned widescreen HUD. */
+    if ((e = getenv("NFSU2_FO2_ASPECT_RATIO")) &&
+        (opt_is(e, "16:9") || opt_is(e, "16:10")))
+        g_hudfix = 0;
     /* HUDFIX=0: legacy, HUD stretched to the full width (diagnostic). */
     if ((e = getenv("HUDFIX")) && *e == '0') g_hudfix = 0;
     if ((e = getenv("NFSU2_RENDER")) && *e){

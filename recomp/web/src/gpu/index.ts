@@ -21,6 +21,8 @@ import type { LocalGpuInspector } from './local-inspector';
 import type { FromPng, ToPng } from './png-worker';
 
 export interface RendererOptions {
+  /** MSAA samples for screen scene passes.  Canvas presentation and game render targets remain resolved single-sample textures. */
+  sampleCount?: 1 | 2 | 4;
   /** where frame dumps go: a URL prefix that accepts PUT <prefix><name>.png (the dev server's /artifacts/) */
   artifacts?: string;
   /** scale factor for dumps (the Mac references are 0.3 of 3600x2196) */
@@ -66,6 +68,11 @@ export interface RendererOptions {
    *  4 numbers in m (id, x, y as parts of the game's picture, scale; reused, read it at once) */
   onMarks?: (n: number, m: Float32Array, ids: Uint32Array) => void;
   log?: (s: string) => void;
+}
+
+/** The original launcher calls its automatic setting 8x; 4x is the portable WebGPU default. */
+export function antialiasingSamples(value?: string): 1 | 2 | 4 {
+  return value === '2' ? 2 : value === '4' || value === 'auto' || value === undefined ? 4 : 1;
 }
 
 export interface RendererStats {
@@ -218,8 +225,9 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     if (was !== 0)
       giveUp(new Error(`this game process ${was === P.DETACHED ? 'takes no renderer any more (one detached, or the game stopped waiting for one)' : 'already has a renderer'}: start a new game to show it again`));
   }
+  const sampleCount = opts.sampleCount ?? 1;
   let enc: Encoder;
-  try { enc = new Encoder(device, mem, reg.ptr, log); } catch (e) { giveUp(e); }
+  try { enc = new Encoder(device, mem, reg.ptr, log, sampleCount); } catch (e) { giveUp(e); }
   enc.logShaders = !!opts.logShaders;
   for (const id of opts.watchTex ?? []) enc.watchTex.add(id);
   if (opts.trace === 'dumps') enc.traceDumps = true; else for (const f of opts.trace ?? []) enc.traceSeq.add(f);
@@ -288,7 +296,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   let winWaits = 0, winWaitMax = 0, winWaitT = performance.now();
   // Firefox names no adapter (the start page's GPU check names its graphics)
   const named = [adapter.info?.vendor, adapter.info?.architecture].filter(Boolean).join(' ') || 'adapter not named';
-  log(`[gpu] renderer attached: ${named}, canvas ${canvas.width}x${canvas.height} ${canvasFormat}, features ${want.join(' ')}${poke ? ', poke' : ''}`);
+  log(`[gpu] renderer attached: ${named}, canvas ${canvas.width}x${canvas.height} ${canvasFormat}, features ${want.join(' ')}, MSAA ${sampleCount}x${sampleCount > 1 ? ' (resolved back buffer; screen blits/shared depth fall back to 1x)' : ''}${poke ? ', poke' : ''}`);
   const pokeLoop = async () => {
     if (poking) return;
     poking = true;

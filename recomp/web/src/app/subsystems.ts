@@ -6,7 +6,7 @@
 //   net       web/src/net    the server's virtual LAN, only with free roam on
 // Each module's own handle has detach(); the adapters pass the options the
 // shell owns and pick the counters the detailed overlay shows.
-import { attachRenderer as gpuAttach } from '../gpu/index';
+import { antialiasingSamples, attachRenderer as gpuAttach } from '../gpu/index';
 import { attachAudio as audioAttach } from '../audio/index';
 import { attachInput as inputAttach } from '../input/index';
 import { attachNet as netAttach } from '../net/index';
@@ -19,6 +19,8 @@ export type {
 
 export const attachRenderer: AttachRenderer = async (proc, canvas, o) => {
   const r = await gpuAttach(proc, canvas, { log: o.log, artifacts: o.artifacts, dumpScale: o.dumpScale, onLost: o.onLost, onMarks: o.onMarks,
+    maxInFlight: o.maxInFlight,
+    sampleCount: antialiasingSamples(o.antialiasing),
     watchTex: o.watchTex,
     // FlatOut 2 triage: retain command records for dumped frames, and include
     // the car's source textures in the same artifact set for visual inspection.
