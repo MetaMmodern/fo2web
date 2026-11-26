@@ -6,7 +6,7 @@
 #include <ctype.h>
 
 enum { RTEMP=0,RIN=1,RCONST=2,RADDR=3,RRAST=4,RATTR=5,ROUT=6,RSAMP=10 };
-enum { MOV=1,ADD,SUB,MAD,MUL,RCP,RSQ,DP3,DP4,MIN,MAX,SLT,SGE,LRP=18,FRC=19,M4X4=20,M4X3,M3X4,M3X3,DCL=31,ABS=35,NRM=36,TEXCOORD=64,TEXKILL,TEX,TEXREG2AR,END=0xffff };
+enum { MOV=1,ADD,SUB,MAD,MUL,RCP,RSQ,DP3,DP4,MIN,MAX,SLT,SGE,LRP=18,FRC=19,M4X4=20,M4X3,M3X4,M3X3,DCL=31,ABS=35,NRM=36,TEXCOORD=64,TEXKILL,TEX,TEXREG2AR=69,END=0xffff };
 typedef struct { char *name,*vsn,*psn,*tex[16]; FO2ShaProgram *vs,*ps; uint32_t vm[256],pm[32]; float vc[256][4],pc[32][4]; FO2ShaPassState st; } Pass;
 typedef struct { char *name; Pass *p; unsigned n,cap; } Tech;
 struct FO2ShaEffect { char *fmt; FO2ShaProgram *prog; unsigned np,pcap; Tech *tech; unsigned nt,tcap; };

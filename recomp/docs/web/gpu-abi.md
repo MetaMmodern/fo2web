@@ -90,7 +90,9 @@ struct VSWin { c: array<vec4f, 4096> }   // 65536 bytes, uniform: the window
 //   row kb+1+n  vertex shader constant cn, n = 0..255
 struct PSPar {                     // 560 bytes, uniform (= the Mac's PSPar)
   aref: f32,                       //  0  MDraw.alpha_ref
-  usec: f32, pad0: f32, pad1: f32, //  4  0 (HD fields on the Mac)
+  usec: f32,                       //  4  0 (HD field on the Mac)
+  opaque_mask: f32,                //  8  bit N = resolved texture N is X8R8G8B8
+  pad1: f32,                       // 12  0
   proj: vec4f,                     // 16  MDraw.proj: stage k = coordIndex + 16 * projMode (as f32)
   c: array<vec4f, 32>,             // 32  pixel shader constants c0..c31 (MDraw.psci block)
   fog: vec4f,                      // 544 MDraw.fogv: FOGCOLOR rgb, a = FOGENABLE (0 or 1)
@@ -114,7 +116,10 @@ struct HLPar {                     // 656 bytes, uniform (gpu_proto.h GwHL)
   `VB[vertex_index * 112]` from the start of the TVert arena (a TVert is always 112 bytes: pos, col0, col1, t[4], all
   `f32`, `gfx.h`).
 - **P** is the Mac's per-draw `PSPar` (`metal.m` encoder): the renderer fills it from the MDraw record and the PS constant
-  pool, 256-aligned (a 768-byte slot stride is the simplest).
+  pool, 256-aligned (a 768-byte slot stride is the simplest). The web-only `opaque_mask` uses the former `pad0`
+  without moving any fields or changing the 560-byte binding. Translated and fixed-function sampling force an
+  X8 sample's alpha to one **before** shader source modifiers/dependent reads. A8/BC alpha and output blend factors
+  remain untouched; no optional texture-view swizzle feature is needed. Uniform-slot reuse includes this mask.
 - **H** is the frame's, not the draw's: bytes `[GW_K_HL, + 656)` of the frame's K arena (`gpu_web.c` keeps the draws'
   blocks after them), bound at that fixed offset of the K buffer. Only the worldheadlight pixel shaders declare it: the
   translator adds `hl_more()` (the other cars' headlights, `runtime/headlights.c`) after their `t1 * t2 * c0 + v0`

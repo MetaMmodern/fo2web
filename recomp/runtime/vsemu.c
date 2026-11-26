@@ -39,7 +39,7 @@ enum { O_NOP=0, O_MOV, O_ADD, O_SUB, O_MAD, O_MUL, O_RCP, O_RSQ, O_DP3, O_DP4,
        O_SINCOS, O_REP, O_ENDREP, O_IF, O_IFC, O_ELSE, O_ENDIF, O_BREAK,
        O_BREAKC, O_MOVA, O_DEFB, O_DEFI,
        /* --- pixel shader instructions (D3D numbering) --- */
-       O_TEXCOORD=64, O_TEXKILL=65, O_TEX=66, O_TEXREG2AR=67, /* ps_1_x tex / texreg2ar */
+       O_TEXCOORD=64, O_TEXKILL=65, O_TEX=66, O_TEXREG2AR=69, /* 67/68 are texbem/texbeml */
        O_EXPP=78, O_LOGP=79, O_CND=80, O_DEF=81,
        O_CMP=88, O_DP2ADD=90, O_TEXLDD=95, O_TEXLDL=97,
        O_END=0xFFFF };

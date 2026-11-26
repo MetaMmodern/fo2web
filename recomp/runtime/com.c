@@ -2066,8 +2066,8 @@ static void draw_posproj(uint32_t vp, uint32_t nv, uint32_t pt, uint32_t stride,
         float x=MRF32(p), y=MRF32(p+4u), z=MRF32(p+8u), rhw=MRF32(p+12u);
         if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !isfinite(rhw) || rhw==0.f) return;
         float w=1.f/rhw;
-        tv[i].x=(2.f*x/(float)width-1.f)*w;
-        tv[i].y=(1.f-2.f*y/(float)height)*w;
+        tv[i].x=fo2_posproj_clip_x(x,width,w);
+        tv[i].y=fo2_posproj_clip_y(y,height,w);
         tv[i].z=z*w; tv[i].w=w;
         if (!isfinite(w) || !isfinite(tv[i].x) || !isfinite(tv[i].y) || !isfinite(tv[i].z)) return;
         tv[i].r=tv[i].g=tv[i].b=tv[i].a=1.f;
@@ -2077,6 +2077,27 @@ static void draw_posproj(uint32_t vp, uint32_t nv, uint32_t pt, uint32_t stride,
             tv[i].t[t][1]=MRF32(p+20u+src*8u);
             if (!isfinite(tv[i].t[t][0]) || !isfinite(tv[i].t[t][1])) return;
             tv[i].t[t][3]=1.f;
+        }
+    }
+    /* Bounded, opt-in original/port comparison at the actual draw, after
+     * effect binds and guest constant/stream updates have all taken effect.
+     * BeginPass-only logs cannot show the later vertex writes or constants. */
+    if (glow_on()){
+        static unsigned post_draw_n;
+        if (glow_take(&post_draw_n,39u)){
+            fprintf(stderr,"[glow] post-draw frame=%u draw=%llu rt=%u logical=%ux%u ps=%d stride=%u uvs=%u vertices=%u primitive=%u blend=%u/%u/%u\n",
+                    g_present_no,(unsigned long long)g_draw,g_cur_rt,width,height,g_cur_ps_id,
+                    stride,uvs,nv,pt,g_rs[27],g_rs[19],g_rs[20]);
+            for (unsigned t=0;t<4;t++){
+                unsigned tw=0,th=0; metal_tex_size(g_tex_stage[t],&tw,&th);
+                fprintf(stderr,"[glow] post-tap stage=%u tex=%u size=%ux%u uv-first=%g,%g uv-last=%g,%g address=%u/%u filter-min-mag-mip=%u/%u/%u\n",
+                        t,g_tex_stage[t],tw,th,tv[0].t[t][0],tv[0].t[t][1],
+                        tv[nv-1].t[t][0],tv[nv-1].t[t][1],g_smp_raw[t][1],g_smp_raw[t][2],
+                        g_smp_raw[t][6],g_smp_raw[t][5],g_smp_raw[t][7]);
+            }
+            for (unsigned r=3;r<=5;r++)
+                fprintf(stderr,"[glow] post-constant c%u=%g,%g,%g,%g\n",r,
+                        g_psc[r][0],g_psc[r][1],g_psc[r][2],g_psc[r][3]);
         }
     }
     metal_set_stage_tex(g_tex_stage[1],g_tex_stage[2],g_tex_stage[3]);

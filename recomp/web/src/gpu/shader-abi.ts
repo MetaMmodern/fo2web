@@ -8,7 +8,8 @@ export const VSPAR_SIZE = 4112;
 /** The K binding: a 64 KB window of the frame's VS constant arena (gpu_proto.h GW_KWIN_ROWS rows); a draw's
  *  block starts at row firstInstance of it, at most KWIN_SIZE - VSPAR_SIZE bytes in. */
 export const KWIN_SIZE = 65536;
-/** PSPar: {aref, usec, pad0, pad1}, proj, 32 vec4f, fog. */
+/** PSPar: {aref, usec, opaque_mask, pad1}, proj, 32 vec4f, fog.
+ * opaque_mask uses the former pad0 word: bit N forces sampled X8 stage N alpha to one. */
 export const PSPAR_SIZE = 560;
 /** HLPar (gpu_proto.h GwHL): the other cars' headlights, {n, s, o, pad} + 8 x {mat4x4f, vec4f}. */
 export const HLPAR_SIZE = 656;
@@ -33,6 +34,11 @@ export interface PsConstants { ALPHA_FUNC: number; PS20_TEXCOORD?: number }
 
 /** Cube-stage mask encoded in a pixel shader variant ID. */
 export function cubeMaskForPs(id: number): number { return id >= PSCUBE ? Math.floor(id / PSCUBE) & 15 : 0; }
+/** X8R8G8B8 (D3DFMT 22) has no stored alpha channel. Use resolved bindings,
+ * not requested IDs (missing/conflicting textures resolve to opaque white). */
+export function opaqueTextureMask(f0: number, f1: number, f2: number, f3: number): number {
+  return (f0 === 22 ? 1 : 0) | (f1 === 22 ? 2 : 0) | (f2 === 22 ? 4 : 0) | (f3 === 22 ? 8 : 0);
+}
 /** True when pixel shader module `ps_<id>` is a cube variant. */
 export function isCubePs(id: number): boolean { return id >= PSCUBE; }
 

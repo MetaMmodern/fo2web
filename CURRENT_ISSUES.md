@@ -1,5 +1,7 @@
 # Current issues
 
+- Parked rendering-parity follow-up: the post combination pass derives its half-texel UV offset from logical 1280×1024 dimensions rather than the physical 3072×1920 texture, leaving a 0.7 × 0.4375 source-texel sampling discrepancy. See docs/PIX_RENDERING_ANALYSIS.md.
+- Parked GPU validation follow-up: the final Fields capture records 12 submissions referencing destroyed `blit rect 3072x1920` temporary textures. Determine whether these originate in game-frame submission or GPU Inspector capture before changing resource lifetimes. See docs/PIX_RENDERING_ANALYSIS.md.
 - Audit production server load and security; address any risks found.
 - Multiplayer search, joining, hosting, and racing have been verified for browser guests, remote players joining a browser host, and same-LAN players joining a browser host. However, players occasionally see “no players left” just before a race starts; investigate this intermittent failure.
 - Bloom extraction now works, but comparison with the original still shows weaker highlight whitening and glow spreading, especially on the sunlit road and grass. Investigate the remaining bloom, colour, and sunbeam differences through the game's effect/API path rather than adding a replacement shader.

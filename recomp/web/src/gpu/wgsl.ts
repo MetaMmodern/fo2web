@@ -22,7 +22,7 @@ struct VOut {
 }`;
 
 const PSPAR = /* wgsl */`
-struct PSPar { aref: f32, usec: f32, pad0: f32, pad1: f32, proj: vec4f, c: array<vec4f, 32>, fog: vec4f }
+struct PSPar { aref: f32, usec: f32, opaque_mask: f32, pad1: f32, proj: vec4f, c: array<vec4f, 32>, fog: vec4f }
 @group(0) @binding(2) var<uniform> P: PSPar;`;
 
 // The CPU vertex path (com.c draw_up -> metal_draw_tv): clip-space vertices,
@@ -56,7 +56,8 @@ ${PSPAR}
 @group(1) @binding(4) var s0: sampler;
 override ALPHA_FUNC: u32 = 7u;
 @fragment fn fs_ff(i: VOut) -> @location(0) vec4f {
-  var c = i.col0 * textureSample(t0, s0, ${cube ? 'i.uv0.xyz' : 'i.uv0.xy'});
+  let texel = textureSample(t0, s0, ${cube ? 'i.uv0.xyz' : 'i.uv0.xy'});
+  var c = i.col0 * vec4f(texel.rgb, select(texel.a, 1.0, (u32(P.opaque_mask) & 1u) != 0u));
   if (ALPHA_FUNC == 7u && c.a < P.aref) { discard; }
   return vec4f(mix(P.fog.rgb, c.rgb, mix(1.0, saturate(i.fog), P.fog.a)), c.a);
 }`;

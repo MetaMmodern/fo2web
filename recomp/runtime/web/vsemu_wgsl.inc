@@ -97,7 +97,7 @@ static const char W_TPICK[] =
     "  return select(select(a, b, s == 1u), select(c, d, s == 3u), s >= 2u);\n"
     "}\n";
 static const char W_PSPAR[] =
-    "struct PSPar { aref: f32, usec: f32, pad0: f32, pad1: f32, proj: vec4f, c: array<vec4f, 32>, fog: vec4f }\n"
+    "struct PSPar { aref: f32, usec: f32, opaque_mask: f32, pad1: f32, proj: vec4f, c: array<vec4f, 32>, fog: vec4f }\n"
     "@group(0) @binding(2) var<uniform> P: PSPar;\n"
     "override ALPHA_FUNC: u32 = 7u;\n"
     "override PS20_TEXCOORD: bool = true;\n"
@@ -136,6 +136,16 @@ static void w_textures(WBuf *b, unsigned cubemask){
                ((cubemask >> k) & 1u) ? "texture_cube<f32>" : "texture_2d<f32>");
     for (int k = 0; k < 4; k++)
         wb_put(b, "@group(1) @binding(%d) var smp%d: sampler;\n", 4 + k, k);
+    /* WebGPU has no X8R8G8B8 format. The backing BGRA alpha can contain an
+     * upload's unused byte or a render target's shader output; D3D samples
+     * it as one regardless. Apply this before source modifiers/AR dependent
+     * reads, not at ps_end (which would change alpha blending). Works without
+     * the optional texture-component-swizzle feature, for cubes too. */
+    for (int k = 0; k < 4; k++)
+        wb_put(b, "fn sample%d(q: %s) -> vec4f {\n"
+                  "  let c = textureSample(tex%d, smp%d, q);\n"
+                  "  return vec4f(c.rgb, select(c.a, 1.0, (u32(P.opaque_mask) & %uu) != 0u));\n"
+                  "}\n", k, ((cubemask >> k) & 1u) ? "vec3f" : "vec2f", k, k, 1u << k);
 }
 
 /* f32 literal that survives a round trip (9 significant digits) and always
@@ -364,10 +374,10 @@ int ps_to_wgsl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cube
             else { smp = dn; crd = dn; }
             int cube = (cubemask >> smp) & 1u;
             if (crd >= 0){
-                if (cube) w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, i.uv%d.xyz)", smp, smp, crd);
-                else      w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, tc%d)", smp, smp, crd);
+                if (cube) w = snprintf(ex, WEX, "sample%d(i.uv%d.xyz)", smp, crd);
+                else      w = snprintf(ex, WEX, "sample%d(tc%d)", smp, crd);
             } else {
-                w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, (%s).%s)", smp, smp, cs, cube ? "xyz" : "xy");
+                w = snprintf(ex, WEX, "sample%d((%s).%s)", smp, cs, cube ? "xyz" : "xy");
             }
             break; }
         case O_TEXREG2AR: {
@@ -380,11 +390,11 @@ int ps_to_wgsl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cube
              * fail to compile. */
             int dn = RN(y->dst) & 3, cube = (cubemask >> dn) & 1u;
             if (cube)
-                w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, vec3f((%s).a, (%s).r, i.uv%d.z))",
-                             dn, dn, s0, s0, dn);
+                w = snprintf(ex, WEX, "sample%d(vec3f((%s).a, (%s).r, i.uv%d.z))",
+                             dn, s0, s0, dn);
             else
-                w = snprintf(ex, WEX, "textureSample(tex%d, smp%d, vec2f((%s).a, (%s).r))",
-                             dn, dn, s0, s0);
+                w = snprintf(ex, WEX, "sample%d(vec2f((%s).a, (%s).r))",
+                             dn, s0, s0);
             break; }
         case O_TEXCOORD: {
             /* texcoord tN / texcrd: t[N] = uvN (the Mac uses the destination
@@ -735,7 +745,7 @@ int wgsl_ff_module(int id, char *out, size_t cap, unsigned cubemask){
     wb_put(&ob, "%s%s", W_VOUT, W_PSPAR);
     w_textures(&ob, cubemask);
     wb_put(&ob, "@fragment fn ps_%d(i: VOut) -> @location(0) vec4f {\n"
-                "  return ps_end(i.col0 * textureSample(tex0, smp0, i.uv0.%s), i.fog);\n}\n",
+                "  return ps_end(i.col0 * sample0(i.uv0.%s), i.fog);\n}\n",
            id, cube ? "xyz" : "xy");
     return ob.ok ? (int)ob.n : 0;
 }

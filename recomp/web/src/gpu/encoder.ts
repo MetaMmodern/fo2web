@@ -23,7 +23,7 @@
 import * as P from './proto';
 import { D, F, Kind, Op } from './proto';
 import { COPY, FF_FS, TVERT_VS } from './wgsl';
-import { createShaderAbi, alphaFunc, PSCUBE, cubeMaskForPs, VSPAR_SIZE, KWIN_SIZE, PSPAR_SIZE, HLPAR_SIZE } from './shader-abi';
+import { createShaderAbi, alphaFunc, PSCUBE, cubeMaskForPs, opaqueTextureMask, VSPAR_SIZE, KWIN_SIZE, PSPAR_SIZE, HLPAR_SIZE } from './shader-abi';
 import { unpackDxt } from './dxt';
 import { dxt1HasPunch, dxt1ToAstc } from './astc';
 
@@ -662,7 +662,7 @@ export class Encoder {
     this.pBuf = this.grow(this.pBuf, (dn + 1) * PSLOT, 'pspar', UV);
     if (this.pStage.length < (dn + 1) * (PSLOT / 4)) this.pStage = new Float32Array((dn + 64) * (PSLOT / 4));
     const ps = this.pStage;
-    let pslots = 0, lastPsci = -1, lastAref = NaN;
+    let pslots = 0, lastPsci = -1, lastAref = NaN, lastOpaque = -1;
     const lastPF = new Float32Array(8);
 
     let pass: GPURenderPassEncoder | null = null;
@@ -736,18 +736,20 @@ export class Encoder {
       if (kind === Kind.Blit) {
         const sid = u32[w + D.blitSrc], tgt = u32[w + D.target];
         const st = sid ? this.tex[sid] : null, dt = tgt ? this.tex[tgt & 0xFFFF] : null;
+        const opaqueSource = !sid || st?.fmt === P.Fmt.X8R8G8B8;
         const sTex = sid ? st?.tex : this.screen!, dTex = tgt ? dt?.tex : this.screen!;
         const r0 = u32[w + D.first], r1 = u32[w + D.count];   // a source rectangle (r1 0: the whole source)
         if (tr) tr.push(`  #${i} blit ${sid || 'SCREEN'}${r1 ? ` (${r0 & 0xFFFF},${r0 >>> 16})-(${r1 & 0xFFFF},${r1 >>> 16})` : ''} -> ${tgt ? tgt & 0xFFFF : 'SCREEN'}${!sTex || !dTex ? ' (missing: skipped)' : ''}`);
         if (!sTex || !dTex || sTex === dTex || (tgt && !dt!.rt)) { skipped++; continue; }
         endPass(); curT = -1; curZ = -1;
-        if (r1 && this.blitRect(enc, sTex, r0, r1, tgt ? dt!.rtViews[0] : this.screenView!, !sid)) passes++;
-        else if (sTex.width === dTex.width && sTex.height === dTex.height && sTex.format === dTex.format && sTex.depthOrArrayLayers === 1 && dTex.depthOrArrayLayers === 1)
+        if (r1 && this.blitRect(enc, sTex, r0, r1, tgt ? dt!.rtViews[0] : this.screenView!, opaqueSource)) passes++;
+        else if ((!opaqueSource || dt?.fmt === P.Fmt.X8R8G8B8) &&
+                 sTex.width === dTex.width && sTex.height === dTex.height && sTex.format === dTex.format && sTex.depthOrArrayLayers === 1 && dTex.depthOrArrayLayers === 1)
           { enc.copyTextureToTexture({ texture: sTex }, { texture: dTex }, [sTex.width, sTex.height, 1]); this.calls.copy++; }
         else {
           const sv = sid ? (st!.cube ? st!.face0 ??= st!.tex.createView({ dimension: '2d', baseArrayLayer: 0, arrayLayerCount: 1, baseMipLevel: 0, mipLevelCount: 1 }) : st!.view) : this.screenView!;
           const dv = tgt ? dt!.rtViews[0] : this.screenView!;
-          this.copyQuad(enc, sv, dv, 'bgra8unorm', this.linear);
+          this.copyQuad(enc, sv, dv, 'bgra8unorm', this.linear, undefined, opaqueSource);
           passes++;
         }
         if (tgt) touched.add((tgt & 0xFFFF) * 8 + ((tgt >>> 16) & 7)); else screenTouched = true;
@@ -800,16 +802,23 @@ export class Encoder {
         cClip = clip;
       }
 
+      // Resolve bindings before PS parameters: X8's sampled alpha is a format
+      // property, even when shader/constants are unchanged between draws.
+      const cubeMask = cubeMaskForPs(psEff);
+      const t1 = u32[w + D.tex1], t2 = u32[w + D.tex2], t3 = u32[w + D.tex3];
+      const v0 = this.texFor(t0, !!(cubeMask & 1), passCube), v1 = this.texFor(t1, !!(cubeMask & 2), passCube),
+        v2 = this.texFor(t2, !!(cubeMask & 4), passCube), v3 = this.texFor(t3, !!(cubeMask & 8), passCube);
+      const opaque = opaqueTextureMask(v0.fmt, v1.fmt, v2.fmt, v3.fmt);
       // PS parameters: a new slot only when they differ from the previous draw's
       const psci = u32[w + D.psci];
-      let same = psci === lastPsci && aref === lastAref;
+      let same = psci === lastPsci && aref === lastAref && opaque === lastOpaque;
       if (same) for (let q = 0; q < 4; q++) if (lastPF[q] !== f32[w + D.proj + q] || lastPF[4 + q] !== f32[w + D.fogv + q]) { same = false; break; }
       if (!same) {
         const o = pslots * (PSLOT / 4);
-        ps[o] = aref; ps[o + 1] = 0; ps[o + 2] = 0; ps[o + 3] = 0;
+        ps[o] = aref; ps[o + 1] = 0; ps[o + 2] = opaque; ps[o + 3] = 0;
         for (let q = 0; q < 4; q++) { ps[o + 4 + q] = lastPF[q] = f32[w + D.proj + q]; ps[o + 136 + q] = lastPF[4 + q] = f32[w + D.fogv + q]; }
         ps.set(f32.subarray(pscW + psci * 128, pscW + psci * 128 + 128), o + 8);
-        lastPsci = psci; lastAref = aref; pslots++;
+        lastPsci = psci; lastAref = aref; lastOpaque = opaque; pslots++;
       }
       const poff = (pslots - 1) * PSLOT;
 
@@ -829,11 +838,7 @@ export class Encoder {
       const kb = koff >= 0 ? (koff - cK) >> 4 : 0;
 
       // group 1: textures and samplers (a texture bound as this pass's target samples white)
-      const cubeMask = cubeMaskForPs(psEff);
-      const t1 = u32[w + D.tex1], t2 = u32[w + D.tex2], t3 = u32[w + D.tex3];
       const s0 = u32[w + D.smp], s1 = u32[w + D.smp + 1], s2 = u32[w + D.smp + 2], s3 = u32[w + D.smp + 3];
-      const v0 = this.texFor(t0, !!(cubeMask & 1), passCube), v1 = this.texFor(t1, !!(cubeMask & 2), passCube),
-        v2 = this.texFor(t2, !!(cubeMask & 4), passCube), v3 = this.texFor(t3, !!(cubeMask & 8), passCube);
       // the same textures and samplers as the previous draw (the common case): nothing to do
       if (b1[0] !== cubeMask || b1[1] !== v0.serial || b1[2] !== v1.serial || b1[3] !== v2.serial || b1[4] !== v3.serial
           || b1[5] !== s0 || b1[6] !== s1 || b1[7] !== s2 || b1[8] !== s3) {
